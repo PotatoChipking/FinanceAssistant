@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 import logging
 import threading
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from src.core.entry_candidates import (
     evaluate_entry_candidate_outcomes,
@@ -26,6 +27,13 @@ from src.core.strategy_engine import (
     rebalance_strategy_weights,
     refresh_strategy_signals,
 )
+from src.core.trade_rules import (
+    get_default_trade_rules,
+    get_trade_rules,
+    reset_trade_rules,
+    save_trade_rules,
+)
+from src.web.database import get_db
 from src.web.database import SessionLocal
 from src.web.models import StrategySignalRun
 
@@ -138,6 +146,10 @@ class CandidateFeedbackIn(BaseModel):
     reason: str = ""
 
 
+class TradeRulesIn(BaseModel):
+    rules: dict = Field(default_factory=dict)
+
+
 @router.get("/entry-candidates")
 def get_entry_candidates(
     market: str = Query("", description="市场代码: CN/HK/US"),
@@ -162,6 +174,36 @@ def get_entry_candidates(
         holding=holding,
         strategy=strategy,
     )
+
+
+@router.get("/trade-rules")
+def get_trade_rules_api(db: Session = Depends(get_db)):
+    rules = get_trade_rules(db)
+    return {
+        "rules": rules,
+        "defaults": get_default_trade_rules(),
+    }
+
+
+@router.put("/trade-rules")
+def update_trade_rules_api(payload: TradeRulesIn, db: Session = Depends(get_db)):
+    try:
+        rules = save_trade_rules(payload.rules, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "rules": rules,
+        "defaults": get_default_trade_rules(),
+    }
+
+
+@router.post("/trade-rules/reset")
+def reset_trade_rules_api(db: Session = Depends(get_db)):
+    rules = reset_trade_rules(db)
+    return {
+        "rules": rules,
+        "defaults": get_default_trade_rules(),
+    }
 
 
 @router.post("/entry-candidates/refresh")

@@ -13,6 +13,7 @@ from src.collectors.kline_collector import KlineCollector
 from src.core.json_safe import to_jsonable
 from src.core.notifier import get_global_proxy
 from src.core.timezone import to_iso_with_tz, utc_now
+from src.core.trade_rules import get_trade_rules
 from src.models.market import MarketCode
 from src.web.database import SessionLocal
 from src.web.models import (
@@ -119,6 +120,23 @@ MARKET_SCAN_SEED_SYMBOLS: dict[str, list[str]] = {
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _rule(rules: dict | None, path: str, default):
+    node = rules or get_trade_rules()
+    try:
+        for part in path.split("."):
+            node = node[part]
+        return node
+    except Exception:
+        return default
+
+
+def _rule_float(rules: dict | None, path: str, default: float) -> float:
+    try:
+        return float(_rule(rules, path, default))
+    except Exception:
+        return float(default)
 
 
 def _safe_float(value) -> float | None:
@@ -389,8 +407,10 @@ def _score_suggestion(
     suggestion: StockSuggestion,
     quote: dict | None,
     kline: dict | None,
+    rules: dict | None = None,
 ) -> tuple[float, list[str]]:
-    score = ACTION_BASE_SCORE.get((action or "").strip().lower(), 45.0)
+    base_scores = _rule(rules, "opportunity.action_base_scores", ACTION_BASE_SCORE)
+    score = float(base_scores.get((action or "").strip().lower(), 45.0))
     evidence: list[str] = []
 
     if suggestion.signal:
@@ -401,59 +421,71 @@ def _score_suggestion(
     if quote:
         pct = _safe_float(quote.get("change_pct"))
         if pct is not None:
-            if 0.5 <= abs(pct) <= 6:
-                score += 2
+            if (
+                _rule_float(rules, "opportunity.suggestion.quote_moderate_abs_min", 0.5)
+                <= abs(pct)
+                <= _rule_float(rules, "opportunity.suggestion.quote_moderate_abs_max", 6)
+            ):
+                score += _rule_float(rules, "opportunity.suggestion.quote_moderate_score", 2)
                 evidence.append(f"当日波动适中({pct:+.2f}%)")
-            elif abs(pct) >= 10:
-                score -= 3
+            elif abs(pct) >= _rule_float(rules, "opportunity.suggestion.quote_extreme_abs_min", 10):
+                score += _rule_float(rules, "opportunity.suggestion.quote_extreme_score", -3)
                 evidence.append(f"当日波动过大({pct:+.2f}%)")
 
     if kline:
         trend = (kline.get("trend") or "").strip()
         if trend == "多头排列":
-            score += 8
+            score += _rule_float(rules, "opportunity.suggestion.trend_bullish", 8)
             evidence.append("均线多头排列")
         elif trend == "空头排列":
-            score -= 8
+            score += _rule_float(rules, "opportunity.suggestion.trend_bearish", -8)
             evidence.append("均线空头排列")
 
         macd = (kline.get("macd_cross") or "").strip()
         if macd == "金叉":
-            score += 5
+            score += _rule_float(rules, "opportunity.suggestion.macd_golden", 5)
             evidence.append("MACD 金叉")
         elif macd == "死叉":
-            score -= 5
+            score += _rule_float(rules, "opportunity.suggestion.macd_dead", -5)
             evidence.append("MACD 死叉")
 
         rsi_status = (kline.get("rsi_status") or "").strip()
         if rsi_status in ("超卖", "偏弱"):
-            score += 2
+            score += _rule_float(rules, "opportunity.suggestion.rsi_weak_or_oversold", 2)
             evidence.append(f"RSI {rsi_status}")
         elif rsi_status in ("超买",):
-            score -= 3
+            score += _rule_float(rules, "opportunity.suggestion.rsi_overbought", -3)
             evidence.append(f"RSI {rsi_status}")
 
         kdj_status = (kline.get("kdj_status") or "").strip()
         if "金叉" in kdj_status:
-            score += 3
+            score += _rule_float(rules, "opportunity.suggestion.kdj_golden", 3)
             evidence.append("KDJ 金叉")
         elif "死叉" in kdj_status:
-            score -= 3
+            score += _rule_float(rules, "opportunity.suggestion.kdj_dead", -3)
             evidence.append("KDJ 死叉")
 
         vol_ratio = _safe_float(kline.get("volume_ratio"))
         if vol_ratio is not None:
-            if vol_ratio >= 2:
-                score += 4
+            if vol_ratio >= _rule_float(rules, "opportunity.suggestion.volume_high_ratio", 2):
+                score += _rule_float(rules, "opportunity.suggestion.volume_high_score", 4)
                 evidence.append(f"量比放大({vol_ratio:.1f}x)")
-            elif vol_ratio >= 1.3:
-                score += 2
+            elif vol_ratio >= _rule_float(rules, "opportunity.suggestion.volume_mid_ratio", 1.3):
+                score += _rule_float(rules, "opportunity.suggestion.volume_mid_score", 2)
                 evidence.append(f"量比温和放大({vol_ratio:.1f}x)")
 
     q = suggestion.meta or {}
     quality = _safe_float((q.get("context_quality_score") if isinstance(q, dict) else None))
     if quality is not None:
-        quality_bonus = _clamp((quality - 60.0) / 10.0, -3.0, 5.0)
+        quality_bonus = _clamp(
+            (
+                quality
+                - _rule_float(rules, "opportunity.suggestion.context_quality_base", 60)
+            )
+            / _rule_float(rules, "opportunity.suggestion.context_quality_divisor", 10),
+            _rule_float(rules, "opportunity.suggestion.context_quality_min_bonus", -3),
+            _rule_float(rules, "opportunity.suggestion.context_quality_max_bonus", 5),
+        )
         score += quality_bonus
         evidence.append(f"上下文质量分 {quality:.0f}")
 
@@ -463,11 +495,11 @@ def _score_suggestion(
             if created_at.tzinfo is None:
                 created_at = created_at.replace(tzinfo=utc_now().tzinfo)
             hours = (utc_now() - created_at).total_seconds() / 3600.0
-            if hours <= 6:
-                score += 3
+            if hours <= _rule_float(rules, "opportunity.suggestion.fresh_hours", 6):
+                score += _rule_float(rules, "opportunity.suggestion.fresh_score", 3)
                 evidence.append("建议新鲜度高(6h内)")
-            elif hours >= 48:
-                score -= 3
+            elif hours >= _rule_float(rules, "opportunity.suggestion.stale_hours", 48):
+                score += _rule_float(rules, "opportunity.suggestion.stale_score", -3)
                 evidence.append("建议时效偏旧(48h+)")
         except Exception:
             pass
@@ -482,6 +514,7 @@ def _build_plan(
     quote: dict | None,
     kline: dict | None,
     suggestion_meta: dict | None = None,
+    rules: dict | None = None,
 ) -> dict:
     meta = suggestion_meta if isinstance(suggestion_meta, dict) else {}
     meta_quote = meta.get("quote") if isinstance(meta.get("quote"), dict) else {}
@@ -512,22 +545,35 @@ def _build_plan(
 
     if price is not None:
         if support is None:
-            support = price * 0.95
+            support = price * _rule_float(rules, "risk.buy_fallback_stop_price_pct", 0.95)
         if resistance is None:
-            resistance = price * 1.06
+            resistance = price * _rule_float(rules, "risk.buy_fallback_target_price_pct", 1.06)
 
         if action in ("buy", "add"):
-            entry_low = price * 0.99
-            entry_high = price * 1.01
-            stop_loss = (support * 0.985) if support else (price * 0.95)
+            band = _rule_float(rules, "risk.entry_band_pct", 0.01)
+            entry_low = price * (1 - band)
+            entry_high = price * (1 + band)
+            stop_loss = (
+                support * _rule_float(rules, "risk.buy_stop_support_discount", 0.985)
+                if support
+                else price * _rule_float(rules, "risk.buy_fallback_stop_price_pct", 0.95)
+            )
             if resistance and resistance > price:
-                target_price = resistance * 0.99
+                target_price = resistance * _rule_float(rules, "risk.target_resistance_discount", 0.99)
             else:
-                target_price = price * 1.06
+                target_price = price * _rule_float(rules, "risk.buy_fallback_target_price_pct", 1.06)
             invalidation = f"若跌破 {stop_loss:.2f} 则失效"
         elif action in ("hold", "watch"):
-            stop_loss = (support * 0.98) if support else (price * 0.94)
-            target_price = (resistance * 0.99) if resistance else (price * 1.04)
+            stop_loss = (
+                support * _rule_float(rules, "risk.hold_stop_support_discount", 0.98)
+                if support
+                else price * _rule_float(rules, "risk.hold_fallback_stop_price_pct", 0.94)
+            )
+            target_price = (
+                resistance * _rule_float(rules, "risk.target_resistance_discount", 0.99)
+                if resistance
+                else price * _rule_float(rules, "risk.hold_fallback_target_price_pct", 1.04)
+            )
             invalidation = f"若跌破 {stop_loss:.2f} 则转防守"
         else:
             invalidation = "当前以风险控制为主，不建议新开仓"
@@ -624,7 +670,9 @@ def _pick_close_on_or_before(klines: list, target: date) -> float | None:
     return None
 
 
-def _derive_market_scan_decision(quote: dict | None, kline: dict | None) -> dict:
+def _derive_market_scan_decision(
+    quote: dict | None, kline: dict | None, rules: dict | None = None
+) -> dict:
     q = quote or {}
     k = kline or {}
     points = 0
@@ -633,58 +681,63 @@ def _derive_market_scan_decision(quote: dict | None, kline: dict | None) -> dict
 
     trend = (k.get("trend") or "").strip()
     if trend == "多头排列":
-        points += 2
+        points += _rule_float(rules, "opportunity.market_scan.trend_bullish", 2)
         tags.append("trend_follow")
         reasons.append("均线多头排列")
     elif trend == "空头排列":
-        points -= 2
+        points += _rule_float(rules, "opportunity.market_scan.trend_bearish", -2)
 
     macd = (k.get("macd_cross") or "").strip()
     if macd == "金叉":
-        points += 2
+        points += _rule_float(rules, "opportunity.market_scan.macd_golden", 2)
         tags.append("macd_golden")
         reasons.append("MACD金叉")
     elif macd == "死叉":
-        points -= 2
+        points += _rule_float(rules, "opportunity.market_scan.macd_dead", -2)
 
     vol_ratio = _safe_float(k.get("volume_ratio"))
     if vol_ratio is not None:
-        if vol_ratio >= 1.8:
-            points += 1
+        if vol_ratio >= _rule_float(rules, "opportunity.market_scan.volume_high_ratio", 1.8):
+            points += _rule_float(rules, "opportunity.market_scan.volume_high_score", 1)
             tags.append("volume_breakout")
             reasons.append(f"放量({vol_ratio:.1f}x)")
-        elif vol_ratio <= 0.7:
-            points -= 1
+        elif vol_ratio <= _rule_float(rules, "opportunity.market_scan.volume_low_ratio", 0.7):
+            points += _rule_float(rules, "opportunity.market_scan.volume_low_score", -1)
 
     pct = _safe_float(q.get("change_pct"))
     if pct is not None:
-        if 1.5 <= pct <= 8.5:
-            points += 1
+        if (
+            _rule_float(rules, "opportunity.market_scan.momentum_min_pct", 1.5)
+            <= pct
+            <= _rule_float(rules, "opportunity.market_scan.momentum_max_pct", 8.5)
+        ):
+            points += _rule_float(rules, "opportunity.market_scan.momentum_score", 1)
             tags.append("momentum")
             reasons.append(f"涨幅{pct:+.2f}%")
-        elif pct >= 10.5:
-            points -= 2
-        elif pct <= -5.5:
-            points += 1
+        elif pct >= _rule_float(rules, "opportunity.market_scan.overheat_pct", 10.5):
+            points += _rule_float(rules, "opportunity.market_scan.overheat_score", -2)
+        elif pct <= _rule_float(rules, "opportunity.market_scan.rebound_pct", -5.5):
+            points += _rule_float(rules, "opportunity.market_scan.rebound_score", 1)
             tags.append("rebound")
             reasons.append("短线超跌")
 
     support = _safe_float(k.get("support_m")) or _safe_float(k.get("support"))
     last_close = _safe_float(k.get("last_close")) or _safe_float(q.get("current_price"))
-    if support and last_close and 0 < support < last_close <= support * 1.03:
-        points += 1
+    support_pct = _rule_float(rules, "opportunity.market_scan.support_proximity_pct", 0.03)
+    if support and last_close and 0 < support < last_close <= support * (1 + support_pct):
+        points += _rule_float(rules, "opportunity.market_scan.support_score", 1)
         tags.append("pullback")
         reasons.append("回踩支撑附近")
 
     action = "watch"
     action_label = "观望"
-    if points >= 4:
+    if points >= _rule_float(rules, "opportunity.market_scan.buy_points", 4):
         action = "buy"
         action_label = "建仓"
-    elif points >= 3:
+    elif points >= _rule_float(rules, "opportunity.market_scan.add_points", 3):
         action = "add"
         action_label = "准备加仓"
-    elif points <= -3:
+    elif points <= _rule_float(rules, "opportunity.market_scan.avoid_points", -3):
         action = "avoid"
         action_label = "回避"
 
@@ -701,9 +754,15 @@ def _derive_market_scan_decision(quote: dict | None, kline: dict | None) -> dict
 
 
 def _score_market_scan_candidate(
-    *, action: str, quote: dict | None, kline: dict | None, strategy_tags: list[str] | None
+    *,
+    action: str,
+    quote: dict | None,
+    kline: dict | None,
+    strategy_tags: list[str] | None,
+    rules: dict | None = None,
 ) -> tuple[float, list[str]]:
-    score = ACTION_BASE_SCORE.get((action or "").strip().lower(), 45.0)
+    base_scores = _rule(rules, "opportunity.action_base_scores", ACTION_BASE_SCORE)
+    score = float(base_scores.get((action or "").strip().lower(), 45.0))
     evidence: list[str] = []
 
     q = quote or {}
@@ -711,32 +770,39 @@ def _score_market_scan_candidate(
     tags = strategy_tags or []
 
     if tags:
-        score += min(8, len(tags) * 2)
+        score += min(
+            _rule_float(rules, "opportunity.market_scan.tag_bonus_max", 8),
+            len(tags) * _rule_float(rules, "opportunity.market_scan.tag_bonus_per_tag", 2),
+        )
         evidence.append("策略信号: " + " / ".join(_strategy_labels(tags[:3])))
 
     pct = _safe_float(q.get("change_pct"))
     if pct is not None:
-        if 1 <= pct <= 7:
-            score += 2
+        if (
+            _rule_float(rules, "opportunity.market_scan.quote_momentum_min_pct", 1)
+            <= pct
+            <= _rule_float(rules, "opportunity.market_scan.quote_momentum_max_pct", 7)
+        ):
+            score += _rule_float(rules, "opportunity.market_scan.quote_momentum_score", 2)
             evidence.append(f"价格动量({pct:+.2f}%)")
-        elif pct >= 10:
-            score -= 3
+        elif pct >= _rule_float(rules, "opportunity.market_scan.quote_overheat_pct", 10):
+            score += _rule_float(rules, "opportunity.market_scan.quote_overheat_score", -3)
             evidence.append(f"涨幅过热({pct:+.2f}%)")
 
     turnover = _safe_float(q.get("turnover"))
     if turnover is not None:
-        if turnover >= 3e9:
-            score += 3
+        if turnover >= _rule_float(rules, "opportunity.market_scan.turnover_high", 3e9):
+            score += _rule_float(rules, "opportunity.market_scan.turnover_high_score", 3)
             evidence.append("成交额高")
-        elif turnover >= 1e9:
-            score += 1
+        elif turnover >= _rule_float(rules, "opportunity.market_scan.turnover_mid", 1e9):
+            score += _rule_float(rules, "opportunity.market_scan.turnover_mid_score", 1)
 
     trend = (k.get("trend") or "").strip()
     if trend == "多头排列":
-        score += 5
+        score += _rule_float(rules, "opportunity.market_scan.score_trend_bullish", 5)
         evidence.append("均线多头排列")
     elif trend == "空头排列":
-        score -= 6
+        score += _rule_float(rules, "opportunity.market_scan.score_trend_bearish", -6)
         evidence.append("均线空头排列")
 
     score = _clamp(score, 0.0, 100.0)
@@ -1259,6 +1325,7 @@ def refresh_entry_candidates(
     max_kline_symbols: int = 72,
 ) -> dict:
     snapshot = (snapshot_date or date.today().strftime("%Y-%m-%d")).strip()
+    rules = get_trade_rules()
     suggestions = _load_latest_suggestions(limit=max_inputs)
     market_scan_map = _load_market_scan_inputs(limit_per_market=max(20, int(market_scan_limit)))
     _persist_market_scan_snapshot(snapshot, market_scan_map)
@@ -1409,6 +1476,7 @@ def refresh_entry_candidates(
                     suggestion=suggestion_obj,
                     quote=quote,
                     kline=kline,
+                    rules=rules,
                 )
                 if (kline.get("trend") or "").strip() == "多头排列":
                     strategy_tags.append("trend_follow")
@@ -1418,7 +1486,7 @@ def refresh_entry_candidates(
                     strategy_tags.append("volume_breakout")
             else:
                 seeded_action = (inp.get("action") or "").strip().lower()
-                decision = _derive_market_scan_decision(quote=quote, kline=kline)
+                decision = _derive_market_scan_decision(quote=quote, kline=kline, rules=rules)
                 if seeded_action in ACTION_BASE_SCORE:
                     action = seeded_action
                     action_label = (inp.get("action_label") or decision.get("action_label") or "观望").strip()
@@ -1448,6 +1516,7 @@ def refresh_entry_candidates(
                     quote=quote,
                     kline=kline,
                     strategy_tags=strategy_tags,
+                    rules=rules,
                 )
 
             if is_holding and action == "buy":
@@ -1463,9 +1532,11 @@ def refresh_entry_candidates(
                 quote=quote,
                 kline=kline,
                 suggestion_meta=(inp.get("meta") or {}),
+                rules=rules,
             )
             seed_plan = inp.get("plan_seed") if isinstance(inp.get("plan_seed"), dict) else {}
-            if seed_plan and _plan_quality(plan) < 90:
+            plan_quality_min = int(_rule_float(rules, "opportunity.active.plan_quality_min", 90))
+            if seed_plan and _plan_quality(plan) < plan_quality_min:
                 merged = dict(seed_plan)
                 for k, v in (plan or {}).items():
                     if v is None:
@@ -1478,8 +1549,12 @@ def refresh_entry_candidates(
             confidence = round(score / 100.0, 3)
 
             status = "inactive"
-            threshold = 62 if candidate_source in ("market_scan", "mixed") else 55
-            if action in ("buy", "add") and quality >= 90 and score >= threshold:
+            threshold = (
+                _rule_float(rules, "opportunity.active.market_scan_min_score", 62)
+                if candidate_source in ("market_scan", "mixed")
+                else _rule_float(rules, "opportunity.active.watchlist_min_score", 55)
+            )
+            if action in ("buy", "add") and quality >= plan_quality_min and score >= threshold:
                 status = "active"
 
             row = EntryCandidate(

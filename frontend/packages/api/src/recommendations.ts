@@ -354,6 +354,29 @@ export interface StrategyWeightHistoryResponse {
   items: StrategyWeightHistoryItem[]
 }
 
+export interface TradeRulesConfig {
+  version?: string
+  technical: {
+    indicators: Record<string, {
+      enabled?: boolean
+      [key: string]: number | boolean | undefined
+    }>
+    thresholds: Record<string, number>
+  }
+  opportunity: {
+    action_base_scores: Record<string, number>
+    suggestion: Record<string, number>
+    market_scan: Record<string, number>
+    active: Record<string, number>
+  }
+  risk: Record<string, number>
+}
+
+export interface TradeRulesResponse {
+  rules: TradeRulesConfig
+  defaults: TradeRulesConfig
+}
+
 const appendQuery = (q: URLSearchParams, key: string, value: unknown) => {
   if (value == null) return
   if (typeof value === 'string') {
@@ -372,6 +395,20 @@ const appendQuery = (q: URLSearchParams, key: string, value: unknown) => {
 }
 
 export const recommendationsApi = {
+  getTradeRules: () =>
+    fetchAPI<TradeRulesResponse>('/recommendations/trade-rules'),
+
+  updateTradeRules: (rules: TradeRulesConfig) =>
+    fetchAPI<TradeRulesResponse>('/recommendations/trade-rules', {
+      method: 'PUT',
+      body: JSON.stringify({ rules }),
+    }),
+
+  resetTradeRules: () =>
+    fetchAPI<TradeRulesResponse>('/recommendations/trade-rules/reset', {
+      method: 'POST',
+    }),
+
   listEntryCandidates: (params?: {
     market?: string
     status?: 'active' | 'inactive' | 'all'

@@ -23,6 +23,8 @@ _STOOQ_CACHE: dict[str, tuple[float, list["KlineData"]]] = {}
 _STOOQ_CACHE_TTL_SECONDS = 300
 _EASTMONEY_CACHE: dict[str, tuple[float, int, list["KlineData"]]] = {}
 _EASTMONEY_CACHE_TTL_SECONDS = 300
+_EASTMONEY_INTRADAY_CACHE: dict[str, tuple[float, int, list["KlineData"]]] = {}
+_EASTMONEY_INTRADAY_CACHE_TTL_SECONDS = 45
 
 
 def _fetch_stooq_us_klines(symbol: str) -> list[KlineData]:
@@ -202,6 +204,103 @@ def _fetch_eastmoney_klines(
 
     _EASTMONEY_CACHE[cache_key] = (now, len(best), best)
     return best[-need_days:] if len(best) > need_days else best
+
+
+def _fetch_eastmoney_intraday_klines(
+    symbol: str, market: MarketCode, interval: str, limit: int
+) -> list["KlineData"]:
+    """Fetch 1-minute or 5-minute klines from Eastmoney for CN/HK symbols."""
+
+    sym = (symbol or "").strip()
+    if not sym:
+        return []
+    if market not in (MarketCode.CN, MarketCode.HK):
+        return []
+
+    klt = "5" if str(interval).lower() in ("5", "5min", "5m") else "1"
+    need_limit = min(max(1, int(limit or 1)), 1200)
+    cache_key = f"{market.value}:{sym}:{klt}"
+    now = time.time()
+    cached = _EASTMONEY_INTRADAY_CACHE.get(cache_key)
+    if (
+        cached
+        and (now - cached[0]) < _EASTMONEY_INTRADAY_CACHE_TTL_SECONDS
+        and cached[1] >= need_limit
+    ):
+        bars = cached[2]
+        return bars[-need_limit:] if len(bars) > need_limit else bars
+
+    secid = _eastmoney_secid(sym, market)
+    params = {
+        "secid": secid,
+        "klt": klt,
+        "fqt": "1",
+        "lmt": str(need_limit),
+        "end": "20500101",
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56",
+        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://quote.eastmoney.com/",
+    }
+
+    last_err = None
+    best: list[KlineData] = []
+    for attempt in range(2):
+        try:
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=8 + attempt * 4,
+                headers=headers,
+            ) as client:
+                resp = client.get(EASTMONEY_KLINE_URL, params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+
+            raw = (
+                (payload or {}).get("data", {}).get("klines", [])
+                if isinstance(payload, dict)
+                else []
+            )
+            out: list[KlineData] = []
+            for row in raw or []:
+                # row format: "YYYY-MM-DD HH:mm,open,close,high,low,volume,..."
+                parts = str(row).split(",")
+                if len(parts) < 6:
+                    continue
+                try:
+                    out.append(
+                        KlineData(
+                            date=parts[0],
+                            open=float(parts[1]),
+                            close=float(parts[2]),
+                            high=float(parts[3]),
+                            low=float(parts[4]),
+                            volume=float(parts[5]),
+                        )
+                    )
+                except Exception:
+                    continue
+            if len(out) > len(best):
+                best = out
+            if best:
+                break
+        except Exception as e:
+            last_err = e
+            time.sleep(0.25 * (attempt + 1))
+
+    if not best and last_err is not None:
+        logger.warning(f"Eastmoney 获取 {symbol} 分钟K线失败: {last_err}")
+        stale = _EASTMONEY_INTRADAY_CACHE.get(cache_key)
+        if stale:
+            bars = stale[2]
+            return bars[-need_limit:] if len(bars) > need_limit else bars
+        return []
+
+    _EASTMONEY_INTRADAY_CACHE[cache_key] = (now, len(best), best)
+    return best[-need_limit:] if len(best) > need_limit else best
 
 
 @dataclass
@@ -571,6 +670,18 @@ class KlineCollector:
                 fb = _fetch_eastmoney_klines(symbol, self.market, min(max(days, 3000), 20000))
                 return fb[-days:] if fb else []
             return []
+
+    def get_intraday_klines(
+        self, symbol: str, interval: str = "1min", limit: int = 241
+    ) -> list[KlineData]:
+        """获取分钟K线数据。当前优先支持 A股/港股，其他市场返回空列表。"""
+
+        return _fetch_eastmoney_intraday_klines(
+            symbol=symbol,
+            market=self.market,
+            interval=interval,
+            limit=limit,
+        )
 
     def get_technical_indicators(self, symbol: str) -> TechnicalIndicators:
         """计算技术指标"""

@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@panwatch/base
 import { KlineSummaryDialog } from '@panwatch/biz-ui/components/kline-summary-dialog'
 import { KlineIndicators } from '@panwatch/biz-ui/components/kline-indicators'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
-import { fetchAPI } from '@panwatch/api'
+import { fetchAPI, type TradeRulesConfig } from '@panwatch/api'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
 import { AiSuggestionBadge } from '@panwatch/biz-ui/components/ai-suggestion-badge'
 import { TechnicalBadge, technicalToneFromSuggestionAction } from '@panwatch/biz-ui/components/technical-badge'
@@ -82,6 +82,7 @@ interface SuggestionBadgeProps {
   market?: string           // 市场（用于技术指标弹窗）
   hasPosition?: boolean     // 是否持仓（用于技术指标弹窗）
   showTechnicalCompanion?: boolean // 是否展示技术指标对照徽章
+  tradeRules?: TradeRulesConfig | null
 }
 
 // 格式化建议时间（自动转换为本地时区，只显示时:分）
@@ -139,6 +140,7 @@ export function SuggestionBadge({
   market = 'CN',
   hasPosition = false,
   showTechnicalCompanion = true,
+  tradeRules = null,
 }: SuggestionBadgeProps) {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [klineDialogOpen, setKlineDialogOpen] = useState(false)
@@ -181,7 +183,7 @@ export function SuggestionBadge({
   if (showFullInline) {
     if (!suggestion) return null
     const isAI = !!suggestion.agent_name && suggestion.agent_label !== '技术指标'
-    const tech = kline ? buildKlineSuggestion(kline as any, hasPosition) : null
+    const tech = kline ? buildKlineSuggestion(kline as any, hasPosition, tradeRules) : null
     const timeStr = formatSuggestionTime(suggestion.created_at)
     const klineMetaStr = formatKlineMeta(suggestion.meta)
     return (
@@ -365,6 +367,7 @@ export function SuggestionBadge({
           stockName={stockName}
           hasPosition={hasPosition}
           initialSummary={kline as any}
+          tradeRules={tradeRules}
         />
       </>
     )
@@ -395,6 +398,7 @@ export function SuggestionBadge({
           stockName={stockName}
           hasPosition={hasPosition}
           initialSummary={kline as any}
+          tradeRules={tradeRules}
         />
       </>
     )
@@ -426,7 +430,7 @@ export function SuggestionBadge({
           />
           {showTechnicalCompanion && suggestion.agent_label !== '技术指标' && (
             (() => {
-              const tech = kline ? buildKlineSuggestion(kline as any, hasPosition) : null
+              const tech = kline ? buildKlineSuggestion(kline as any, hasPosition, tradeRules) : null
               return (
                 <TechnicalBadge
                   label={tech ? tech.action_label : '观望'}
@@ -572,9 +576,10 @@ export function SuggestionBadge({
         symbol={stockSymbol || ''}
         market={market}
         stockName={stockName}
-        hasPosition={hasPosition}
-        initialSummary={kline as any}
-      />
+          hasPosition={hasPosition}
+          initialSummary={kline as any}
+          tradeRules={tradeRules}
+        />
     </>
   )
 }

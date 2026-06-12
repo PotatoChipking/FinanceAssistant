@@ -11,6 +11,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.core.providers import ProviderRequest, get_quote_orchestrator
+from src.core.trade_rules import get_trade_rules
 from src.models.market import MarketCode, MARKETS
 from src.web.database import SessionLocal
 from src.web.models import (
@@ -51,6 +52,16 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except Exception:
         return None
+
+
+def _rule_float(rules: dict | None, path: str, default: float) -> float:
+    node: Any = rules or {}
+    try:
+        for part in path.split("."):
+            node = node[part]
+        return float(node)
+    except Exception:
+        return float(default)
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +294,9 @@ class PaperTradingEngine:
 
         # 预算各市场可用现金（建仓时按市场子池逐笔扣减）
         market_cash = {m: market_available_cash(db, account, m, alloc) for m in ALL_MARKETS}
+        rules = get_trade_rules(db)
+        stop_loss_pct = _rule_float(rules, "risk.paper_fallback_stop_loss_pct", 0.08)
+        target_profit_pct = _rule_float(rules, "risk.paper_fallback_target_profit_pct", 0.15)
 
         opened = 0
         for sig in candidates:
@@ -317,10 +331,10 @@ class PaperTradingEngine:
                     target_price = round(entry_price * (1 + target_ratio), 4) if target_price else None
             # 兜底：止损不合理时用默认 -8%
             if not stop_loss or stop_loss <= 0 or stop_loss >= entry_price:
-                stop_loss = round(entry_price * 0.92, 4)
+                stop_loss = round(entry_price * (1 - stop_loss_pct), 4)
             # 兜底：止盈不合理时用默认 +15%
             if not target_price or target_price <= 0 or target_price <= entry_price:
-                target_price = round(entry_price * 1.15, 4)
+                target_price = round(entry_price * (1 + target_profit_pct), 4)
 
             pos = PaperTradingPosition(
                 stock_symbol=sig.stock_symbol,

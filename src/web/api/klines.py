@@ -13,7 +13,7 @@ class KlineItem(BaseModel):
     symbol: str = Field(..., description="股票代码")
     market: str = Field(..., description="市场: CN/HK/US")
     days: int | None = Field(default=60, description="K线天数")
-    interval: str | None = Field(default="1d", description="周期: 1d/1w/1m")
+    interval: str | None = Field(default="1d", description="周期: 1min/5min/1d/1w/1m")
 
 
 class KlineBatchRequest(BaseModel):
@@ -99,18 +99,42 @@ def _aggregate_klines(klines, interval: str) -> list:
     return out
 
 
+def _is_intraday_interval(interval: str) -> bool:
+    iv = (interval or "").lower()
+    return iv in ("1min", "1minute", "minute", "min", "1", "5min", "5minute", "5m", "5")
+
+
+def _normalize_intraday_interval(interval: str) -> str:
+    iv = (interval or "").lower()
+    if iv in ("5min", "5minute", "5m", "5"):
+        return "5min"
+    return "1min"
+
+
+def _load_klines(collector: KlineCollector, symbol: str, days: int, interval: str):
+    if _is_intraday_interval(interval):
+        intraday_interval = _normalize_intraday_interval(interval)
+        limit = min(max(int(days or 0), 60), 1200)
+        return collector.get_intraday_klines(
+            symbol,
+            interval=intraday_interval,
+            limit=limit,
+        )
+    klines = collector.get_klines(symbol, days=days)
+    return _aggregate_klines(klines, interval)
+
+
 @router.get("/{symbol}")
 def get_klines(symbol: str, market: str = "CN", days: int = 60, interval: str = "1d"):
     """获取单只股票K线数据"""
     market_code = _parse_market(market)
     collector = KlineCollector(market_code)
-    klines = collector.get_klines(symbol, days=days)
-    klines = _aggregate_klines(klines, interval)
+    klines = _load_klines(collector, symbol, days, interval)
     return {
         "symbol": symbol,
         "market": market_code.value,
         "days": days,
-        "interval": interval,
+        "interval": _normalize_intraday_interval(interval) if _is_intraday_interval(interval) else interval,
         "klines": _serialize_klines(klines),
     }
 
@@ -127,14 +151,13 @@ def get_klines_batch(payload: KlineBatchRequest):
         collector = KlineCollector(market_code)
         days = item.days or 60
         interval = item.interval or "1d"
-        klines = collector.get_klines(item.symbol, days=days)
-        klines = _aggregate_klines(klines, interval)
+        klines = _load_klines(collector, item.symbol, days, interval)
         results.append(
             {
                 "symbol": item.symbol,
                 "market": market_code.value,
                 "days": days,
-                "interval": interval,
+                "interval": _normalize_intraday_interval(interval) if _is_intraday_interval(interval) else interval,
                 "klines": _serialize_klines(klines),
             }
         )

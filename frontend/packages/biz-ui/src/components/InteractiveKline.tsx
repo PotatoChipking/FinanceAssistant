@@ -4,6 +4,8 @@ import { fetchAPI } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
 type BusinessDay = { year: number; month: number; day: number }
+type KlineTime = BusinessDay | number
+export type KlineInterval = '1min' | '5min' | '1d' | '1w' | '1m'
 
 type KlineItem = {
   date: string
@@ -43,19 +45,52 @@ type HoverTip = {
   row: HoverTipRow | null
 }
 
+type SeriesKline = KlineItem & {
+  time: KlineTime
+  timeKey: string
+}
+
 function parseBusinessDay(dateStr: string): BusinessDay | null {
   const m = String(dateStr || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/)
   if (!m) return null
   return { year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) }
 }
 
-function parseCrosshairDateKey(time: any): string | null {
+function parseKlineTime(dateStr: string): KlineTime | null {
+  const raw = String(dateStr || '').trim()
+  const day = parseBusinessDay(raw)
+  if (day) return day
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/)
+  if (!m) return null
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const dayOfMonth = Number(m[3])
+  const hour = Number(m[4])
+  const minute = Number(m[5])
+  const second = Number(m[6] || 0)
+  if (![year, month, dayOfMonth, hour, minute, second].every(Number.isFinite)) return null
+  return Math.floor(Date.UTC(year, month - 1, dayOfMonth, hour - 8, minute, second) / 1000)
+}
+
+function timeKeyFromKlineDate(dateStr: string): string | null {
+  const time = parseKlineTime(dateStr)
+  if (typeof time === 'number') return `t:${time}`
+  if (!time) return null
+  return `d:${time.year.toString().padStart(4, '0')}-${time.month.toString().padStart(2, '0')}-${time.day.toString().padStart(2, '0')}`
+}
+
+function parseCrosshairTimeKey(time: any): string | null {
+  if (typeof time === 'number' && Number.isFinite(time)) return `t:${time}`
   if (!time || typeof time !== 'object') return null
   const year = Number(time.year)
   const month = Number(time.month)
   const day = Number(time.day)
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null
-  return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
+  return `d:${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
+}
+
+function isIntradayInterval(interval: KlineInterval) {
+  return interval === '1min' || interval === '5min'
 }
 
 function sma(values: number[], period: number): Array<number | null> {
@@ -155,10 +190,11 @@ function addHistogram(chart: any, LW: any, options: any) {
 export default function InteractiveKline(props: {
   symbol: string
   market: string
-  initialInterval?: '1d' | '1w' | '1m'
+  initialInterval?: KlineInterval
   initialDays?: '60' | '120' | '250'
   density?: 'normal' | 'compact' | 'mini'
-  endpointBuilder?: (args: { symbol: string; market: string; days: number; interval: '1d' | '1w' | '1m' }) => string
+  availableIntervals?: KlineInterval[]
+  endpointBuilder?: (args: { symbol: string; market: string; days: number; interval: KlineInterval }) => string
 }) {
   const isCompact = props.density === 'compact'
   const isMini = props.density === 'mini'
@@ -168,18 +204,32 @@ export default function InteractiveKline(props: {
   const rsiHeight = isCompact ? 72 : 110
   const [lwReady, setLwReady] = useState(!!getLW())
   const [libError, setLibError] = useState(false)
-  const [interval, setIntervalValue] = useState<'1d' | '1w' | '1m'>(props.initialInterval || '1d')
+  const [interval, setIntervalValue] = useState<KlineInterval>(props.initialInterval || '1d')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [data, setData] = useState<KlineItem[]>([])
   const [showRsi, setShowRsi] = useState(!dense)
   const [hoverTip, setHoverTip] = useState<HoverTip>({ visible: false, x: 0, y: 0, row: null })
+  const intervalItems = useMemo(() => {
+    const all: Array<{ value: KlineInterval; label: string }> = [
+      { value: '1min', label: '分时' },
+      { value: '5min', label: '5分' },
+      { value: '1d', label: '日K' },
+      { value: '1w', label: '周K' },
+      { value: '1m', label: '月K' },
+    ]
+    const available = props.availableIntervals || (props.endpointBuilder ? ['1d'] : all.map(item => item.value))
+    const availableSet = new Set<KlineInterval>(available)
+    return all.filter(item => availableSet.has(item.value))
+  }, [props.availableIntervals, props.endpointBuilder])
 
   const fixedDays = useMemo(() => {
     const customDays = Number(props.initialDays)
     if (Number.isFinite(customDays) && customDays > 0) {
       return Math.floor(customDays)
     }
+    if (interval === '1min') return 241
+    if (interval === '5min') return 240
     if (interval === '1m') return 360
     if (interval === '1w') return 180
     return 120
@@ -231,6 +281,13 @@ export default function InteractiveKline(props: {
   }, [props.initialInterval, props.symbol, props.market])
 
   useEffect(() => {
+    if (!intervalItems.length) return
+    if (!intervalItems.some(item => item.value === interval)) {
+      setIntervalValue(intervalItems[0].value)
+    }
+  }, [intervalItems, interval])
+
+  useEffect(() => {
     if (lwReady) return
     let cancelled = false
     const start = Date.now()
@@ -253,16 +310,24 @@ export default function InteractiveKline(props: {
   }, [lwReady])
 
   const series = useMemo(() => {
-    const klines = (data || []).slice().filter(k => !!parseBusinessDay(k.date))
+    const klines = (data || [])
+      .slice()
+      .map(k => {
+        const time = parseKlineTime(k.date)
+        const timeKey = timeKeyFromKlineDate(k.date)
+        if (!time || !timeKey) return null
+        return { ...k, time, timeKey } as SeriesKline
+      })
+      .filter(Boolean) as SeriesKline[]
     const candles = klines.map(k => ({
-      time: parseBusinessDay(k.date) as BusinessDay,
+      time: k.time,
       open: k.open,
       high: k.high,
       low: k.low,
       close: k.close,
     }))
     const volumes = klines.map(k => ({
-      time: parseBusinessDay(k.date) as BusinessDay,
+      time: k.time,
       value: k.volume || 0,
       color: k.close >= k.open ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)',
     }))
@@ -293,7 +358,7 @@ export default function InteractiveKline(props: {
   const indexByDate = useMemo(() => {
     const m = new Map<string, number>()
     for (let i = 0; i < series.klines.length; i++) {
-      m.set(series.klines[i].date, i)
+      m.set(series.klines[i].timeKey, i)
     }
     return m
   }, [series.klines])
@@ -315,8 +380,9 @@ export default function InteractiveKline(props: {
     const bg = rootStyle.getPropertyValue('--card').trim()
     const fg = rootStyle.getPropertyValue('--foreground').trim()
 
-    const defaultBars = interval === '1d' ? 100 : interval === '1w' ? 78 : 72
-    const defaultSpacing = interval === '1d' ? 8.5 : interval === '1w' ? 10 : 10
+    const intraday = isIntradayInterval(interval)
+    const defaultBars = interval === '1min' ? 120 : interval === '5min' ? 96 : interval === '1d' ? 100 : interval === '1w' ? 78 : 72
+    const defaultSpacing = intraday ? 6 : interval === '1d' ? 8.5 : interval === '1w' ? 10 : 10
     const chart = LW.createChart(container, {
       width: container.clientWidth,
       height: chartHeight,
@@ -332,6 +398,8 @@ export default function InteractiveKline(props: {
         barSpacing: defaultSpacing,
         minBarSpacing: 1,
         lockVisibleTimeRangeOnResize: true,
+        timeVisible: intraday,
+        secondsVisible: false,
       },
       handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
@@ -369,7 +437,7 @@ export default function InteractiveKline(props: {
       series.klines
         .map((k, i) => {
           const v = arr[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: k.time, value: v }
         })
         .filter(Boolean)
 
@@ -407,13 +475,13 @@ export default function InteractiveKline(props: {
       const macdLineData = series.klines
         .map((k, i) => {
           const v = series.macd.macd[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: k.time, value: v }
         })
         .filter(Boolean)
       const sigLineData = series.klines
         .map((k, i) => {
           const v = series.macd.signal[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: k.time, value: v }
         })
         .filter(Boolean)
       const histData = series.klines
@@ -421,7 +489,7 @@ export default function InteractiveKline(props: {
           const v = series.macd.hist[i]
           if (v == null) return null
           return {
-            time: parseBusinessDay(k.date) as BusinessDay,
+            time: k.time,
             value: v,
             color: v >= 0 ? 'rgba(239, 68, 68, 0.35)' : 'rgba(16, 185, 129, 0.35)',
           }
@@ -456,7 +524,7 @@ export default function InteractiveKline(props: {
       const rsiData = series.klines
         .map((k, i) => {
           const v = series.rsi6[i]
-          return v == null ? null : { time: parseBusinessDay(k.date) as BusinessDay, value: v }
+          return v == null ? null : { time: k.time, value: v }
         })
         .filter(Boolean)
       rsiLine.setData(rsiData as any)
@@ -475,8 +543,8 @@ export default function InteractiveKline(props: {
     chart.timeScale().subscribeVisibleTimeRangeChange(sync)
     chart.subscribeCrosshairMove?.((param: any) => {
       const point = param?.point
-      const dateKey = parseCrosshairDateKey(param?.time)
-      if (!point || !dateKey || !series.klines.length) {
+      const timeKey = parseCrosshairTimeKey(param?.time)
+      if (!point || !timeKey || !series.klines.length) {
         setHoverTip(prev => (prev.visible ? { visible: false, x: 0, y: 0, row: null } : prev))
         return
       }
@@ -489,7 +557,7 @@ export default function InteractiveKline(props: {
         setHoverTip(prev => (prev.visible ? { visible: false, x: 0, y: 0, row: null } : prev))
         return
       }
-      const idx = indexByDate.get(dateKey)
+      const idx = indexByDate.get(timeKey)
       if (idx == null || idx < 0 || idx >= series.klines.length) {
         setHoverTip(prev => (prev.visible ? { visible: false, x: 0, y: 0, row: null } : prev))
         return
@@ -567,11 +635,7 @@ export default function InteractiveKline(props: {
             强弱线
           </Button>}
           <div className="inline-flex rounded-lg border border-border/60 bg-accent/20 p-0.5">
-            {([
-              { value: '1d', label: '日K' },
-              { value: '1w', label: '周K' },
-              { value: '1m', label: '月K' },
-            ] as const).map(item => (
+            {intervalItems.map(item => (
               <button
                 key={item.value}
                 type="button"
@@ -643,9 +707,9 @@ export default function InteractiveKline(props: {
               <span>收盘价 <span className="font-mono text-foreground">{hoverTip.row.close.toFixed(2)}</span></span>
               <span>最高价 <span className="font-mono text-foreground">{hoverTip.row.high.toFixed(2)}</span></span>
               <span>最低价 <span className="font-mono text-foreground">{hoverTip.row.low.toFixed(2)}</span></span>
-              <span>5日均线 <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
-              <span>10日均线 <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
-              <span>20日均线 <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
+              <span>{isIntradayInterval(interval) ? 'MA5' : '5日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
+              <span>{isIntradayInterval(interval) ? 'MA10' : '10日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
+              <span>{isIntradayInterval(interval) ? 'MA20' : '20日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
               <span>MACD线 <span className="font-mono text-foreground">{hoverTip.row.macd != null ? hoverTip.row.macd.toFixed(3) : '--'}</span></span>
               <span>信号线 <span className="font-mono text-foreground">{hoverTip.row.signal != null ? hoverTip.row.signal.toFixed(3) : '--'}</span></span>
               <span>RSI强弱 <span className="font-mono text-foreground">{hoverTip.row.rsi6 != null ? hoverTip.row.rsi6.toFixed(1) : '--'}</span></span>

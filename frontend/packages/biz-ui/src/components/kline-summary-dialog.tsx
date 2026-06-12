@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Sparkles } from 'lucide-react'
-import { fetchAPI } from '@panwatch/api'
+import { fetchAPI, type TradeRulesConfig } from '@panwatch/api'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
@@ -67,6 +67,7 @@ interface KlineSummaryDialogProps {
   stockName?: string
   hasPosition?: boolean
   initialSummary?: KlineSummaryData | null
+  tradeRules?: TradeRulesConfig | null
 }
 
 function formatLocalDateTime(iso?: string): string {
@@ -88,43 +89,18 @@ export function KlineSummaryDialog({
   stockName,
   hasPosition,
   initialSummary = null,
+  tradeRules = null,
 }: KlineSummaryDialogProps) {
   const [loading, setLoading] = useState(false)
   const [summary, setSummary] = useState<KlineSummaryData | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const buildSuggestion = (s: KlineSummaryData, holding?: boolean) => {
-    const scored = buildKlineSuggestion(s, holding)
-    const items: Array<{ text: string; delta: number }> = []
-    let localScore = 0
-
-    const add = (text: string, delta: number) => { items.push({ text, delta }); localScore += delta }
-
-    if (s.trend?.includes('多头')) add('均线多头排列，趋势偏强', 2)
-    else if (s.trend?.includes('空头')) add('均线空头排列，趋势偏弱', -2)
-
-    if (s.macd_status?.includes('金叉')) add('MACD 金叉，短线动能偏强', 2)
-    if (s.macd_status?.includes('死叉')) add('MACD 死叉，短线动能转弱', -2)
-    if (typeof s.macd_hist === 'number') add(`MACD 柱体${s.macd_hist > 0 ? '为正' : s.macd_hist < 0 ? '为负' : '接近0'}`, s.macd_hist > 0 ? 1 : s.macd_hist < 0 ? -1 : 0)
-
-    if (s.rsi_status?.includes('超卖')) add('RSI 超卖，可能存在反弹', 1)
-    else if (s.rsi_status?.includes('偏强')) add('RSI 偏强，买盘占优', 1)
-    else if (s.rsi_status?.includes('超买')) add('RSI 超买，注意回调风险', -1)
-    else if (s.rsi_status?.includes('偏弱')) add('RSI 偏弱，短线承压', -1)
-
-    if (s.kdj_status?.includes('金叉')) add('KDJ 金叉，短线转强', 1)
-    if (s.kdj_status?.includes('死叉')) add('KDJ 死叉，短线转弱', -1)
-
-    if (s.boll_status?.includes('突破上轨')) add('突破布林上轨，趋势强势', 1)
-    else if (s.boll_status?.includes('跌破下轨')) add('跌破布林下轨，走势偏弱', -1)
-
-    if (s.volume_trend?.includes('放量')) add('放量配合，资金参与度提升', 1)
-    else if (s.volume_trend?.includes('缩量')) add('缩量，动能不足', -1)
-
-    if (s.last_close != null && s.support != null && s.support > 0 && s.last_close <= s.support * 1.02) add('价格接近支撑位，止跌反弹概率提升', 1)
-    if (s.last_close != null && s.resistance != null && s.resistance > 0 && s.last_close >= s.resistance * 0.98) add('价格接近压力位，上行空间受限', -1)
-
-    return { ...scored, score: localScore, items }
+    const scored = buildKlineSuggestion(s, holding, tradeRules)
+    return {
+      ...scored,
+      items: scored.evidence.map((x) => ({ text: x.text, delta: x.delta })),
+    }
   }
 
   useEffect(() => {

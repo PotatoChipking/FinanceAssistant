@@ -18,6 +18,7 @@ from src.core.strategy_catalog import (
     list_strategy_catalog,
 )
 from src.core.timezone import to_iso_with_tz, utc_now
+from src.core.trade_rules import get_trade_rules
 from src.models.market import MarketCode
 from src.web.database import SessionLocal
 from src.web.models import (
@@ -226,6 +227,16 @@ def _safe_float(value) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _rule_float(rules: dict | None, path: str, default: float) -> float:
+    node = rules or {}
+    try:
+        for part in path.split("."):
+            node = node[part]
+        return float(node)
+    except Exception:
+        return float(default)
 
 
 def _to_market(value: str | None) -> MarketCode:
@@ -787,6 +798,7 @@ def _compute_factor_breakdown(
     regime_info: dict | None,
     cross_feature: dict | None = None,
     news_metric: dict | None = None,
+    rules: dict | None = None,
 ) -> dict:
     base_score = float(row.score or 0.0)
     action = (row.action or "watch").strip().lower() or "watch"
@@ -880,7 +892,8 @@ def _compute_factor_breakdown(
     if action in ("buy", "add") and not has_entry:
         # No entry window means this is not executable; force into watch semantics.
         raw_score -= 8.0
-    if action in ("buy", "add") and plan_quality < 90:
+    plan_quality_min = int(_rule_float(rules, "opportunity.active.plan_quality_min", 90))
+    if action in ("buy", "add") and plan_quality < plan_quality_min:
         raw_score -= 6.0
     final_score = _clamp(raw_score * float(weight or 1.0) * regime_multiplier, 0.0, 100.0)
     # Keep score semantics aligned with action/status: high scores should be actionable.
@@ -1223,6 +1236,7 @@ def refresh_strategy_signals(
         if not candidates:
             return {"snapshot_date": snapshot, "count": 0, "items": []}
 
+        rules = get_trade_rules(db)
         profile_map = get_strategy_profile_map()
         regime_rows = _upsert_market_regime_snapshots(
             db=db,
@@ -1285,6 +1299,7 @@ def refresh_strategy_signals(
                     regime_info=regime_info,
                     cross_feature=cross_features.get(int(c.id)) if c.id is not None else None,
                     news_metric=normalized_news_metric,
+                    rules=rules,
                 )
                 rank_score = float(score_breakdown.get("weighted_score") or 0.0)
                 confidence = c.confidence if c.confidence is not None else round(rank_score / 100.0, 3)

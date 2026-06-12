@@ -3,10 +3,12 @@ import ReactMarkdown from 'react-markdown'
 import { Copy, Download, ExternalLink, RefreshCw, Share2, Sparkles } from 'lucide-react'
 import {
   insightApi,
+  recommendationsApi,
   stocksApi,
   tradingAgentsApi,
   type DeepAnalysisResult,
   type HistoryComparisonResponse,
+  type TradeRulesConfig,
 } from '@panwatch/api'
 import { getMarketBadge } from '@panwatch/biz-ui'
 import { useLocalStorage } from '@/lib/utils'
@@ -16,7 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@panwatch/base-ui/components/ui/switch'
 import { SuggestionBadge, type KlineSummary, type SuggestionInfo } from '@panwatch/biz-ui/components/suggestion-badge'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
-import InteractiveKline from '@panwatch/biz-ui/components/InteractiveKline'
+import InteractiveKline, { type KlineInterval } from '@panwatch/biz-ui/components/InteractiveKline'
 import { KlineIndicators } from '@panwatch/biz-ui/components/kline-indicators'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
 import StockPriceAlertPanel from '@panwatch/biz-ui/components/stock-price-alert-panel'
@@ -291,10 +293,11 @@ function TechnicalIndicatorStrip(props: {
   stockSymbol: string
   market: string
   hasPosition: boolean
+  tradeRules?: TradeRulesConfig | null
   score?: number
   evidence?: Array<{ text: string; delta: number }>
 }) {
-  const { klineSummary, technicalSuggestion, stockName, stockSymbol, market, hasPosition, score, evidence = [] } = props
+  const { klineSummary, technicalSuggestion, stockName, stockSymbol, market, hasPosition, tradeRules = null, score, evidence = [] } = props
   if (!klineSummary) {
     return <div className="text-[12px] text-muted-foreground py-3">暂无技术指标</div>
   }
@@ -309,6 +312,7 @@ function TechnicalIndicatorStrip(props: {
           market={market}
           kline={klineSummary}
           hasPosition={hasPosition}
+          tradeRules={tradeRules}
         />
         <TechnicalBadge label={`评分 ${Number(score ?? 0).toFixed(1)}`} tone="neutral" size="xs" className="text-foreground" />
       </div>
@@ -358,6 +362,7 @@ export default function StockInsightModal(props: {
   )
   const [quote, setQuote] = useState<QuoteResponse | null>(null)
   const [klineSummary, setKlineSummary] = useState<KlineSummary | null>(null)
+  const [tradeRules, setTradeRules] = useState<TradeRulesConfig | null>(null)
   const [miniKlines, setMiniKlines] = useState<MiniKlineResponse['klines']>([])
   const [miniKlineLoading, setMiniKlineLoading] = useState(false)
   const [miniHoverIdx, setMiniHoverIdx] = useState<number | null>(null)
@@ -373,7 +378,7 @@ export default function StockInsightModal(props: {
   const [deepShowDebate, setDeepShowDebate] = useState(false)
   const [deepHistory, setDeepHistory] = useState<HistoryComparisonResponse | null>(null)
   const [deepHistoryLoading, setDeepHistoryLoading] = useState(false)
-  const [klineInterval] = useState<'1d' | '1w' | '1m'>('1d')
+  const [klineInterval] = useState<KlineInterval>('1d')
   const [alerting, setAlerting] = useState(false)
   const [watchingStock, setWatchingStock] = useState<StockItem | null>(null)
   const [watchToggleLoading, setWatchToggleLoading] = useState(false)
@@ -785,6 +790,13 @@ export default function StockInsightModal(props: {
   }, [props.open, symbol, includeExpiredSuggestions, loadSuggestions])
 
   useEffect(() => {
+    if (!props.open) return
+    recommendationsApi.getTradeRules()
+      .then((res) => setTradeRules(res.rules))
+      .catch(() => {})
+  }, [props.open])
+
+  useEffect(() => {
     if (!props.open || !symbol) return
     loadReports().catch(() => setReports([]))
   }, [props.open, symbol, loadReports])
@@ -802,8 +814,8 @@ export default function StockInsightModal(props: {
   const hasHolding = !!props.hasPosition || !!holdingAgg
   const technicalScored = useMemo(() => {
     if (!klineSummary) return null
-    return buildKlineSuggestion(klineSummary as any, hasHolding)
-  }, [klineSummary, hasHolding])
+    return buildKlineSuggestion(klineSummary as any, hasHolding, tradeRules)
+  }, [klineSummary, hasHolding, tradeRules])
   const technicalFallbackSuggestion = useMemo<SuggestionInfo | null>(() => {
     if (!klineSummary || !technicalScored) return null
     const topEvidence = (technicalScored.evidence || []).filter(e => e.delta !== 0).slice(0, 3).map(e => e.text)
@@ -1540,6 +1552,7 @@ export default function StockInsightModal(props: {
                             stockSymbol={symbol}
                             market={market}
                             hasPosition={!!props.hasPosition}
+                            tradeRules={tradeRules}
                             score={Number(technicalScored?.score ?? 0)}
                             evidence={technicalScored?.evidence || []}
                           />
@@ -1569,6 +1582,7 @@ export default function StockInsightModal(props: {
                           market={market}
                           hasPosition={!!props.hasPosition}
                           showTechnicalCompanion={false}
+                          tradeRules={tradeRules}
                         />
                         <div className="rounded bg-accent/10 p-2 text-[11px]">
                           <div className="text-muted-foreground">核心判断</div>
@@ -1782,7 +1796,7 @@ export default function StockInsightModal(props: {
                 {suggestions.length === 0 ? (
                   technicalFallbackSuggestion ? (
                     <div className="card p-4">
-                      <SuggestionBadge suggestion={technicalFallbackSuggestion} stockName={resolvedName} stockSymbol={symbol} kline={klineSummary} hasPosition={!!props.hasPosition} />
+                      <SuggestionBadge suggestion={technicalFallbackSuggestion} stockName={resolvedName} stockSymbol={symbol} kline={klineSummary} hasPosition={!!props.hasPosition} tradeRules={tradeRules} />
                       <div className="mt-2 text-[10px] text-muted-foreground">
                         {autoSuggesting ? '正在自动生成 AI 建议（通常 5-15 秒）...' : '当前显示技术指标基础建议'}
                       </div>
@@ -1796,7 +1810,7 @@ export default function StockInsightModal(props: {
                   <div className="max-h-[56vh] overflow-y-auto pr-1 scrollbar space-y-3">
                     {suggestions.map((item, idx) => (
                       <div key={`${item.created_at || 's'}-${idx}`} className="card p-4">
-                        <SuggestionBadge suggestion={item} stockName={resolvedName} stockSymbol={symbol} kline={klineSummary} hasPosition={!!props.hasPosition} />
+                        <SuggestionBadge suggestion={item} stockName={resolvedName} stockSymbol={symbol} kline={klineSummary} hasPosition={!!props.hasPosition} tradeRules={tradeRules} />
                       </div>
                     ))}
                   </div>

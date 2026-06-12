@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, useLocation, Navigate } from 'react-router-dom'
-import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Activity, CalendarDays, SlidersHorizontal } from 'lucide-react'
+import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Activity, CalendarDays, SlidersHorizontal, ShieldCheck } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
 import { appApi, fetchAPI, isAuthenticated, logout } from '@panwatch/api'
 import DashboardPage from '@/pages/Dashboard'
@@ -15,6 +15,7 @@ import PriceAlertsPage from '@/pages/PriceAlerts'
 import PaperTradingPage from '@/pages/PaperTrading'
 import MarketEventsPage from '@/pages/MarketEvents'
 import ScreenerPage from '@/pages/Screener'
+import TradeRulesPage from '@/pages/TradeRules'
 import LoginPage from '@/pages/Login'
 import LogsModal from '@panwatch/biz-ui/components/logs-modal'
 import AmbientBackground from '@panwatch/biz-ui/components/AmbientBackground'
@@ -26,6 +27,7 @@ const navItems = [
   { to: '/', icon: LayoutDashboard, label: '首页' },
   { to: '/portfolio', icon: List, label: '持仓' },
   { to: '/opportunities', icon: Sparkles, label: '机会' },
+  { to: '/trade-rules', icon: ShieldCheck, label: '规则' },
   { to: '/screener', icon: SlidersHorizontal, label: '选股' },
   { to: '/events', icon: CalendarDays, label: '事件' },
   { to: '/alerts', icon: BellRing, label: '提醒' },
@@ -36,9 +38,9 @@ const navItems = [
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 const desktopPrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[3], navItems[4]]
-const desktopMoreNavItems = [navItems[5], navItems[6], navItems[7], navItems[8], navItems[9], navItems[10]]
-const mobilePrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[4]]
-const mobileMoreNavItems = [navItems[3], navItems[5], navItems[6], navItems[7], navItems[8], navItems[9], navItems[10]]
+const desktopMoreNavItems = [navItems[5], navItems[6], navItems[7], navItems[8], navItems[9], navItems[10], navItems[11]]
+const mobilePrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[5]]
+const mobileMoreNavItems = [navItems[3], navItems[4], navItems[6], navItems[7], navItems[8], navItems[9], navItems[10], navItems[11]]
 
 // 认证守卫组件
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -355,6 +357,7 @@ function App() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/opportunities" element={<OpportunitiesPage />} />
+          <Route path="/trade-rules" element={<TradeRulesPage />} />
           <Route path="/screener" element={<ScreenerPage />} />
           <Route path="/events" element={<MarketEventsPage />} />
           <Route path="/portfolio" element={<StocksPage />} />

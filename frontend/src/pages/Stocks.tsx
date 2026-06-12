@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Plus, Trash2, Pencil, Search, X, TrendingUp, Bot, Play, RefreshCw, Wallet, PiggyBank, ArrowUpRight, ArrowDownRight, Building2, ChevronDown, ChevronRight, Cpu, Bell, Clock, Newspaper, ExternalLink, BarChart3, Brain } from 'lucide-react'
-import { fetchAPI, stocksApi, type AIService, type NotifyChannel } from '@panwatch/api'
+import { fetchAPI, recommendationsApi, stocksApi, type AIService, type NotifyChannel, type TradeRulesConfig } from '@panwatch/api'
 import { useLocalStorage } from '@/lib/utils'
 import { SuggestionBadge, type SuggestionInfo, type KlineSummary } from '@panwatch/biz-ui/components/suggestion-badge'
 import { buildKlineSuggestion } from '@/lib/kline-scorer'
@@ -349,6 +349,7 @@ export default function StocksPage() {
   const [quotesLoading, setQuotesLoading] = useState(false)
   // Keyed by `${market}:${symbol}` to avoid cross-market symbol collisions
   const [klineSummaries, setKlineSummaries] = useState<Record<string, KlineSummary>>({})
+  const [tradeRules, setTradeRules] = useState<TradeRulesConfig | null>(null)
 
   // Auto-refresh (持久化到 localStorage)
   const [autoRefresh, setAutoRefresh] = useLocalStorage('panwatch_stocks_autoRefresh', false)
@@ -802,7 +803,16 @@ export default function StocksPage() {
     ])
   }, [refreshQuotes, loadPoolSuggestions, refreshKlines])
 
-  useEffect(() => { load(); loadPortfolio(); loadPoolSuggestions(); loadPriceAlertSummaries(); refreshKlines() }, [])
+  useEffect(() => {
+    load()
+    loadPortfolio()
+    loadPoolSuggestions()
+    loadPriceAlertSummaries()
+    refreshKlines()
+    recommendationsApi.getTradeRules()
+      .then((res) => setTradeRules(res.rules))
+      .catch(() => {})
+  }, [])
 
   // 仅关注列表场景（无持仓）也要在列表加载后预取 K 线摘要，保证技术指标徽章可见
   const watchlistKlineInitDone = useRef(false)
@@ -1392,7 +1402,7 @@ export default function StocksPage() {
     // 无池建议时，使用 K 线评分构建轻量建议（仅用于徽章展示）
     const ks = klineSummaries[key]
     if (ks) {
-      const scored = buildKlineSuggestion(ks as any, hasPosition)
+      const scored = buildKlineSuggestion(ks as any, hasPosition, tradeRules)
       return {
         suggestion: {
           action: scored.action,
@@ -1998,6 +2008,7 @@ export default function StocksPage() {
                                             kline={kline}
                                             market={pos.market}
                                             hasPosition={true}
+                                            tradeRules={tradeRules}
                                           />
                                         </span>
                                       ) : null
@@ -2183,6 +2194,7 @@ export default function StocksPage() {
                                       kline={kline}
                                       market={pos.market}
                                       hasPosition={true}
+                                      tradeRules={tradeRules}
                                     />
                                   </div>
                                 ) : null
@@ -2414,6 +2426,7 @@ export default function StocksPage() {
                           kline={kline}
                           market={stock.market}
                           hasPosition={false}
+                          tradeRules={tradeRules}
                         />
                       ) : (
                         <div className="text-[11px] text-muted-foreground/70 py-2">暂无技术面/AI 分析</div>
@@ -2512,6 +2525,7 @@ export default function StocksPage() {
         stockName={klineDialogName}
         hasPosition={klineDialogHasPosition}
         initialSummary={klineDialogInitialSummary as any}
+        tradeRules={tradeRules}
       />
 
       <StockInsightModal

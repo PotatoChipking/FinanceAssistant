@@ -118,17 +118,19 @@ class EastMoneyDiscoveryCollector:
         market: str = "CN",
         mode: str = "gainers",
         limit: int = 12,
+        scope: str = "industry",
     ) -> list[HotBoard]:
         if market != "CN":
             return []
 
         fid = "f3" if mode in ("gainers", "hot") else "f6"
         fields = "f12,f14,f2,f3,f4,f6"
-        fs = "m:90+t:2"  # industry boards
+        scope_key = (scope or "industry").strip().lower()
+        fs = "m:90+t:3" if scope_key in ("concept", "concepts") else "m:90+t:2"
 
         params = {
             "pn": 1,
-            "pz": max(1, min(int(limit), 100)),
+            "pz": max(1, min(int(limit), 500)),
             "po": 1,
             "np": 1,
             "fltt": 2,

@@ -974,12 +974,19 @@ async def search_boards(
 ):
     query = (q or "").strip().lower()
     coll = _collector()
-    gainers, turnover = await asyncio.gather(
-        coll.fetch_hot_boards(market="CN", mode="gainers", limit=100),
-        coll.fetch_hot_boards(market="CN", mode="turnover", limit=100),
+    industry_gainers, industry_turnover, concept_gainers, concept_turnover = await asyncio.gather(
+        coll.fetch_hot_boards(market="CN", mode="gainers", limit=500, scope="industry"),
+        coll.fetch_hot_boards(market="CN", mode="turnover", limit=500, scope="industry"),
+        coll.fetch_hot_boards(market="CN", mode="gainers", limit=500, scope="concept"),
+        coll.fetch_hot_boards(market="CN", mode="turnover", limit=500, scope="concept"),
     )
     by_code = {}
-    for item in list(gainers) + list(turnover):
+    for item in (
+        list(industry_gainers)
+        + list(industry_turnover)
+        + list(concept_gainers)
+        + list(concept_turnover)
+    ):
         if item.code not in by_code:
             by_code[item.code] = item
     rows = []
@@ -1015,7 +1022,7 @@ def get_board_watchlist(db: Session = Depends(get_db)):
 def add_board_to_watchlist(payload: WatchBoardRequest, db: Session = Depends(get_db)):
     market = (payload.market or "CN").strip().upper()
     if market != "CN":
-        raise HTTPException(400, "v1 仅支持 A 股行业板块")
+        raise HTTPException(400, "v1 仅支持 A 股板块")
     code = (payload.board_code or "").strip().upper()
     name = (payload.board_name or "").strip()
     if not code or not name:

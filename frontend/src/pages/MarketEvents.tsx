@@ -50,6 +50,32 @@ const periodLabel: Record<MarketEventPeriod, string> = {
   rolling_month: '近30天',
 }
 
+const OVERVIEW_CACHE_TTL_MS = 10 * 60 * 1000
+const BOARD_SIGNAL_CACHE_TTL_MS = 30 * 60 * 1000
+
+const readTimedCache = <T,>(key: string, ttlMs: number): T | null => {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed.savedAt !== 'number') return null
+    if (Date.now() - parsed.savedAt > ttlMs) return null
+    return parsed.value as T
+  } catch {
+    return null
+  }
+}
+
+const writeTimedCache = (key: string, value: unknown) => {
+  if (typeof window === 'undefined') return
+  try {
+    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), value }))
+  } catch {
+    // ignore localStorage quota and privacy-mode failures
+  }
+}
+
 const sentimentLabel: Record<EventSentiment, string> = {
   positive: '偏多',
   negative: '偏空',
@@ -316,7 +342,17 @@ export default function MarketEventsPage() {
     localStorage.setItem('market-events-board-view-mode', mode)
   }
 
-  const loadOverview = useCallback(async () => {
+  const loadOverview = useCallback(async (force = false) => {
+    const cacheKey = `market-events-overview:${market}:${period}`
+    if (!force) {
+      const cached = readTimedCache<MarketEventsOverview>(cacheKey, OVERVIEW_CACHE_TTL_MS)
+      if (cached) {
+        setData(cached)
+        setLoading(false)
+        setError('')
+        return
+      }
+    }
     setLoading(true)
     setError('')
     try {
@@ -327,6 +363,7 @@ export default function MarketEventsPage() {
         board_limit: 12,
       })
       setData(result)
+      writeTimedCache(cacheKey, result)
     } catch (err: any) {
       setError(err?.message || '加载失败')
     } finally {
@@ -334,10 +371,21 @@ export default function MarketEventsPage() {
     }
   }, [market, period])
 
-  const loadBoardSignals = useCallback(async (boards: WatchedBoardItem[]) => {
+  const loadBoardSignals = useCallback(async (boards: WatchedBoardItem[], force = false) => {
     if (!boards.length) {
       setBoardSignals({})
       return
+    }
+    const codes = boards.map((x) => x.board_code).sort()
+    const cacheKey = `market-events-board-signals:${codes.join(',')}`
+    if (!force) {
+      const cached = readTimedCache<Record<string, BoardSignalSummary>>(cacheKey, BOARD_SIGNAL_CACHE_TTL_MS)
+      if (cached) {
+        setBoardSignals(cached)
+        setBoardsLoading(false)
+        setBoardError('')
+        return
+      }
     }
     setBoardsLoading(true)
     setBoardError('')
@@ -353,6 +401,7 @@ export default function MarketEventsPage() {
         if (item.status === 'fulfilled') next[item.value[0]] = item.value[1]
       })
       setBoardSignals(next)
+      writeTimedCache(cacheKey, next)
     } catch (err: any) {
       setBoardError(err?.message || '板块信号加载失败')
     } finally {
@@ -360,13 +409,13 @@ export default function MarketEventsPage() {
     }
   }, [])
 
-  const loadWatchlist = useCallback(async () => {
+  const loadWatchlist = useCallback(async (forceSignals = false) => {
     setBoardsLoading(true)
     setBoardError('')
     try {
       const rows = await marketEventsApi.listWatchedBoards()
       setWatchedBoards(rows)
-      await loadBoardSignals(rows)
+      await loadBoardSignals(rows, forceSignals)
     } catch (err: any) {
       setBoardError(err?.message || '关注板块加载失败')
     } finally {
@@ -375,7 +424,7 @@ export default function MarketEventsPage() {
   }, [loadBoardSignals])
 
   useEffect(() => {
-    loadOverview()
+    loadOverview(false)
   }, [loadOverview])
 
   useEffect(() => {
@@ -405,7 +454,7 @@ export default function MarketEventsPage() {
       })
       setQuery('')
       setSearchResults([])
-      await loadWatchlist()
+      await loadWatchlist(true)
     } catch (err: any) {
       setBoardError(err?.message || '添加板块失败')
     }
@@ -415,7 +464,7 @@ export default function MarketEventsPage() {
     setBoardError('')
     try {
       await marketEventsApi.deleteWatchedBoard(board.board_code, 'CN')
-      await loadWatchlist()
+      await loadWatchlist(true)
     } catch (err: any) {
       setBoardError(err?.message || '移除板块失败')
     }
@@ -430,7 +479,7 @@ export default function MarketEventsPage() {
         board_codes: watchedBoards.map((x) => x.board_code),
         days: 120,
       })
-      await loadBoardSignals(watchedBoards)
+      await loadBoardSignals(watchedBoards, true)
     } catch (err: any) {
       setBoardError(err?.message || '刷新板块失败')
     } finally {
@@ -512,7 +561,7 @@ export default function MarketEventsPage() {
               <SelectItem value="rolling_month">近30天</SelectItem>
             </SelectContent>
           </Select>
-          <Button variant="secondary" onClick={loadOverview} disabled={loading}>
+          <Button variant="secondary" onClick={() => loadOverview(true)} disabled={loading}>
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             刷新
           </Button>
