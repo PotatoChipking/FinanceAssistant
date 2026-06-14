@@ -65,8 +65,8 @@ export async function fetchAPI<T>(path: string, options?: ApiRequestOptions): Pr
       },
       signal: requestOptions.signal || timeoutController?.signal,
     })
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error('请求超时，请稍后重试')
     }
     throw error

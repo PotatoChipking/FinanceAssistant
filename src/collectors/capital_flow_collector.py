@@ -123,16 +123,6 @@ class CapitalFlowCollector:
                 main_net_5d=main_net_5d,  # 5日主力净流入
             )
 
-            # print(f"代码: {capital_flow.symbol}")
-            # print(f"名称: {capital_flow.name}")
-            # print(f"主力净流入: {capital_flow.main_net_inflow:,.2f} 元")
-            # print(f"主力净流入占比: {capital_flow.main_net_inflow_pct}%")
-            # print(f"超大单净流入: {capital_flow.super_net_inflow:,.2f} 元")
-            # print(f"大单净流入: {capital_flow.big_net_inflow:,.2f} 元")
-            # print(f"中单净流入: {capital_flow.mid_net_inflow:,.2f} 元")
-            # print(f"小单净流入: {capital_flow.small_net_inflow:,.2f} 元")
-            # print(f"5日主力净流入: {capital_flow.main_net_5d:,.2f} 元")
-
             return capital_flow
 
         except Exception as e:

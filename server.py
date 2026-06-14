@@ -1333,6 +1333,13 @@ async def lifespan(app):
     if context_maintenance_scheduler:
         context_maintenance_scheduler.shutdown()
         logger.info("上下文维护调度器已关闭")
+    # 退出前将 WAL 合并回主库并截断，回收空间、缩短下次崩溃恢复时间
+    try:
+        from src.web.database import checkpoint_wal
+
+        checkpoint_wal()
+    except Exception as e:
+        logger.warning(f"退出前 WAL checkpoint 失败: {e}")
 
 
 # 模块级 app 实例，供 uvicorn reload 使用
@@ -1381,8 +1388,8 @@ if static_dir:
 
 
 if __name__ == "__main__":
-    print("盯盘侠启动: http://127.0.0.1:8000")
-    print("API 文档: http://127.0.0.1:8000/docs")
+    logger.info("盯盘侠启动: http://127.0.0.1:8000")
+    logger.info("API 文档: http://127.0.0.1:8000/docs")
     uvicorn.run(
         "server:app",
         host="0.0.0.0",

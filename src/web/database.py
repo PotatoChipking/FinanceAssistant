@@ -28,11 +28,29 @@ engine = create_engine(
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_conn, connection_record):
     cursor = dbapi_conn.cursor()
+    # WAL: 允许多读单写并发；busy_timeout: 写锁竞争时等待而非立即报错
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA busy_timeout=30000")
     cursor.execute("PRAGMA synchronous=NORMAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    # 性能/健壮性增强（纯本地优化，不改变语义）：
+    cursor.execute("PRAGMA temp_store=MEMORY")  # 临时表/索引放内存，减少磁盘 IO
+    cursor.execute("PRAGMA cache_size=-16000")  # ~16MB 页缓存（负值=KB）
+    cursor.execute("PRAGMA wal_autocheckpoint=1000")  # 每 ~1000 页自动 checkpoint，控制 WAL 体积
     cursor.close()
+
+
+def checkpoint_wal() -> None:
+    """主动将 WAL 合并回主库并截断（建议在应用退出前调用）。
+
+    长时间运行下 WAL 文件会持续增长；TRUNCATE 模式 checkpoint 可回收空间，
+    也降低异常退出后崩溃恢复的耗时。
+    """
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as e:  # pragma: no cover - 退出路径，失败不影响功能
+        logger.warning(f"WAL checkpoint 失败: {e}")
 
 
 SessionLocal = sessionmaker(bind=engine)
@@ -52,11 +70,9 @@ def get_db():
 
 def init_db():
     Base.metadata.create_all(bind=engine)
-    _migrate(engine)
-    _migrate_old_providers(engine)
-    _migrate_settings_to_models(engine)
-    _migrate_positions_to_accounts(engine)
-    _migrate_remove_stock_enabled(engine)
+    # 历史的命令式迁移（_migrate / _migrate_old_providers / ...）已统一纳入版本化框架
+    # （migrations.py 中以 imperative=True 注册为 v1–v5），由 run_versioned_migrations 触发，
+    # 因而只跑一次并被跟踪。此处不再直接调用。
     if has_pending_migrations(engine):
         _backup_db_before_migration()
     run_versioned_migrations(engine)

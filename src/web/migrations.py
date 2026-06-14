@@ -22,6 +22,10 @@ class Migration:
     version: int
     name: str
     runner: Callable[[Connection], None]
+    # imperative=True 的历史迁移自行管理连接/事务/PRAGMA（runner 接收的是 Engine 而非
+    # Connection），框架不会用单个事务包裹它们；其版本跟踪记录在独立事务中。
+    # 这类迁移必须保持幂等，以便失败后可安全重跑。
+    imperative: bool = False
 
     @property
     def checksum(self) -> str:
@@ -1709,7 +1713,51 @@ def _m120_screener_task_fields(conn: Connection) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 历史（命令式）迁移 v1–v5
+#
+# 这些函数早期是在 init_db() 里每次启动直接调用的，与版本化框架并存形成「两套系统」。
+# 现统一纳入 MIGRATIONS（imperative=True），从而只跑一次且有版本跟踪。函数体仍保留在
+# database.py 中（涉及自管理连接、PRAGMA foreign_keys 切换、SQLite 旧版本 DROP COLUMN
+# 回退等，必须在框架事务之外执行），这里只做薄封装并按原顺序注册在版本化迁移之前。
+# 全部幂等：在已迁移过的库上重跑会被各自的 _has_table/_has_column/计数判断短路。
+# ---------------------------------------------------------------------------
+def _m001_legacy_schema_columns(engine: Engine) -> None:
+    from src.web import database
+
+    database._migrate(engine)
+
+
+def _m002_legacy_old_providers(engine: Engine) -> None:
+    from src.web import database
+
+    database._migrate_old_providers(engine)
+
+
+def _m003_legacy_settings_to_models(engine: Engine) -> None:
+    from src.web import database
+
+    database._migrate_settings_to_models(engine)
+
+
+def _m004_legacy_positions_to_accounts(engine: Engine) -> None:
+    from src.web import database
+
+    database._migrate_positions_to_accounts(engine)
+
+
+def _m005_legacy_remove_stock_enabled(engine: Engine) -> None:
+    from src.web import database
+
+    database._migrate_remove_stock_enabled(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
+    Migration(1, "legacy_schema_and_columns", _m001_legacy_schema_columns, imperative=True),
+    Migration(2, "legacy_old_providers", _m002_legacy_old_providers, imperative=True),
+    Migration(3, "legacy_settings_to_models", _m003_legacy_settings_to_models, imperative=True),
+    Migration(4, "legacy_positions_to_accounts", _m004_legacy_positions_to_accounts, imperative=True),
+    Migration(5, "legacy_remove_stock_enabled", _m005_legacy_remove_stock_enabled, imperative=True),
     Migration(101, "agent_config_kind_and_visibility", _m101_agent_config_kind),
     Migration(102, "backfill_agent_kind_data", _m102_backfill_agent_kind),
     Migration(103, "agent_run_observability_fields", _m103_agent_run_observability),
@@ -1760,11 +1808,71 @@ def has_pending_migrations(engine: Engine) -> bool:
     return False
 
 
+def _run_imperative_migration(engine: Engine, m: Migration) -> None:
+    """执行 imperative 迁移：runner 自管理连接/事务，版本跟踪走独立事务。
+
+    与事务型迁移不同，这里无法依赖单事务回滚（runner 内部已提交 DDL），因此要求迁移幂等。
+    """
+    with engine.begin() as conn:
+        _ensure_schema_table(conn)
+        rec = _get_applied(conn, m.version)
+        if rec and rec[2] == 1 and rec[1] == m.checksum:
+            return
+        conn.execute(
+            text(
+                """
+INSERT INTO schema_migrations(version, name, checksum, success, error)
+VALUES(:version, :name, :checksum, 0, '')
+ON CONFLICT(version) DO UPDATE SET
+  name = excluded.name,
+  checksum = excluded.checksum,
+  success = 0,
+  error = ''
+"""
+            ),
+            {"version": m.version, "name": m.name, "checksum": m.checksum},
+        )
+
+    logger.info("Applying migration v%s: %s", m.version, m.name)
+    try:
+        m.runner(engine)
+    except Exception as exc:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+UPDATE schema_migrations
+SET success = 0, error = :error, applied_at = CURRENT_TIMESTAMP
+WHERE version = :version
+"""
+                ),
+                {"version": m.version, "error": str(exc)[:2000]},
+            )
+        logger.exception("Migration v%s failed: %s", m.version, m.name)
+        raise
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+UPDATE schema_migrations
+SET success = 1, error = '', applied_at = CURRENT_TIMESTAMP
+WHERE version = :version
+"""
+            ),
+            {"version": m.version},
+        )
+
+
 def run_versioned_migrations(engine: Engine) -> None:
     with engine.begin() as conn:
         _ensure_schema_table(conn)
 
     for m in MIGRATIONS:
+        if m.imperative:
+            _run_imperative_migration(engine, m)
+            continue
+
         with engine.begin() as conn:
             _ensure_schema_table(conn)
             rec = _get_applied(conn, m.version)
