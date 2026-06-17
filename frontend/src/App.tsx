@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, useLocation, Navigate } from 'react-router-dom'
-import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Activity, CalendarDays, SlidersHorizontal, ShieldCheck, Trophy } from 'lucide-react'
+import { Moon, Sun, TrendingUp, Bot, ScrollText, Settings, List, Database, Clock, LayoutDashboard, LogOut, Github, BellRing, MoreHorizontal, Sparkles, Activity, CalendarDays, SlidersHorizontal, Trophy } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
 import { appApi, fetchAPI, isAuthenticated, logout } from '@panwatch/api'
 import DashboardPage from '@/pages/Dashboard'
@@ -24,25 +24,47 @@ import ChatWidget from '@/components/ChatWidget'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
-const navItems = [
-  { to: '/', icon: LayoutDashboard, label: '首页' },
-  { to: '/portfolio', icon: List, label: '持仓' },
-  { to: '/opportunities', icon: Sparkles, label: '机会' },
-  { to: '/trade-rules', icon: ShieldCheck, label: '规则' },
-  { to: '/strategies', icon: Trophy, label: '策略' },
-  { to: '/screener', icon: SlidersHorizontal, label: '选股' },
-  { to: '/events', icon: CalendarDays, label: '事件' },
-  { to: '/alerts', icon: BellRing, label: '提醒' },
-  { to: '/paper-trading', icon: Activity, label: '模拟盘' },
-  { to: '/agents', icon: Bot, label: 'Agent' },
-  { to: '/history', icon: Clock, label: '历史' },
-  { to: '/datasources', icon: Database, label: '数据源' },
-  { to: '/settings', icon: Settings, label: '设置' },
+type NavItem = { to: string; icon: typeof LayoutDashboard; label: string }
+type NavGroup = { label: string; items: NavItem[] }
+
+const NAV = {
+  home: { to: '/', icon: LayoutDashboard, label: '首页' },
+  portfolio: { to: '/portfolio', icon: List, label: '持仓' },
+  alerts: { to: '/alerts', icon: BellRing, label: '提醒' },
+  screener: { to: '/screener', icon: SlidersHorizontal, label: '选股' },
+  opportunities: { to: '/opportunities', icon: Sparkles, label: '机会' },
+  events: { to: '/events', icon: CalendarDays, label: '事件' },
+  strategies: { to: '/strategies', icon: Trophy, label: '策略' },
+  paper: { to: '/paper-trading', icon: Activity, label: '模拟盘' },
+  agents: { to: '/agents', icon: Bot, label: 'Agent' },
+  history: { to: '/history', icon: Clock, label: '历史' },
+  datasources: { to: '/datasources', icon: Database, label: '数据源' },
+  settings: { to: '/settings', icon: Settings, label: '设置' },
+} satisfies Record<string, NavItem>
+
+// 按使用意图分组(规则已并入设置,不再作为一级入口;回测在「策略」页内)
+const NAV_GROUPS: NavGroup[] = [
+  { label: '盯盘', items: [NAV.home, NAV.portfolio, NAV.alerts] },
+  { label: '发现', items: [NAV.screener, NAV.opportunities, NAV.events] },
+  { label: '策略', items: [NAV.strategies, NAV.paper] },
+  { label: '系统', items: [NAV.agents, NAV.history, NAV.datasources, NAV.settings] },
 ]
-const desktopPrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[3], navItems[4]]
-const desktopMoreNavItems = [navItems[5], navItems[6], navItems[7], navItems[8], navItems[9], navItems[10], navItems[11], navItems[12]]
-const mobilePrimaryNavItems = [navItems[0], navItems[1], navItems[2], navItems[6]]
-const mobileMoreNavItems = [navItems[3], navItems[4], navItems[5], navItems[7], navItems[8], navItems[9], navItems[10], navItems[11], navItems[12]]
+
+// 直达项(顶栏/底栏常驻),其余按分组收进「更多」
+const desktopPrimaryNavItems: NavItem[] = [NAV.home, NAV.portfolio, NAV.screener, NAV.events, NAV.strategies, NAV.paper]
+const mobilePrimaryNavItems: NavItem[] = [NAV.home, NAV.portfolio, NAV.screener, NAV.alerts]
+
+function buildMoreGroups(primary: NavItem[]): NavGroup[] {
+  const primarySet = new Set(primary.map(i => i.to))
+  return NAV_GROUPS
+    .map(g => ({ label: g.label, items: g.items.filter(i => !primarySet.has(i.to)) }))
+    .filter(g => g.items.length > 0)
+}
+
+const desktopMoreGroups = buildMoreGroups(desktopPrimaryNavItems)
+const mobileMoreGroups = buildMoreGroups(mobilePrimaryNavItems)
+const desktopMoreNavItems: NavItem[] = desktopMoreGroups.flatMap(g => g.items)
+const mobileMoreNavItems: NavItem[] = mobileMoreGroups.flatMap(g => g.items)
 
 // 认证守卫组件
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -203,23 +225,28 @@ function App() {
                   更多
                 </button>
                 {desktopMoreOpen && (
-                  <div className="absolute right-0 mt-2 w-40 rounded-xl border border-border/60 bg-card/95 backdrop-blur p-1.5 shadow-xl">
-                    {desktopMoreNavItems.map(({ to, icon: Icon, label }) => {
-                      const isActive = location.pathname.startsWith(to)
-                      return (
-                        <NavLink
-                          key={to}
-                          to={to}
-                          onClick={() => setDesktopMoreOpen(false)}
-                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] transition-colors ${
-                            isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
-                          }`}
-                        >
-                          <Icon className="w-3.5 h-3.5" />
-                          {label}
-                        </NavLink>
-                      )
-                    })}
+                  <div className="absolute right-0 mt-2 w-44 rounded-xl border border-border/60 bg-card/95 backdrop-blur p-1.5 shadow-xl">
+                    {desktopMoreGroups.map((group, gi) => (
+                      <div key={group.label} className={gi > 0 ? 'mt-1.5 pt-1.5 border-t border-border/40' : ''}>
+                        <div className="px-2.5 py-1 text-[10px] font-semibold tracking-wide text-muted-foreground/60">{group.label}</div>
+                        {group.items.map(({ to, icon: Icon, label }) => {
+                          const isActive = location.pathname.startsWith(to)
+                          return (
+                            <NavLink
+                              key={to}
+                              to={to}
+                              onClick={() => setDesktopMoreOpen(false)}
+                              className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] transition-colors ${
+                                isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
+                              }`}
+                            >
+                              <Icon className="w-3.5 h-3.5" />
+                              {label}
+                            </NavLink>
+                          )
+                        })}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -333,23 +360,28 @@ function App() {
           </button>
         </div>
         {mobileMoreOpen && (
-          <div className="absolute bottom-[58px] right-2 w-40 rounded-xl border border-border/60 bg-card/95 backdrop-blur p-1.5 shadow-xl">
-            {mobileMoreNavItems.map(({ to, icon: Icon, label }) => {
-              const isActive = location.pathname.startsWith(to)
-              return (
-                <NavLink
-                  key={to}
-                  to={to}
-                  onClick={() => setMobileMoreOpen(false)}
-                  className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] transition-colors ${
-                    isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
-                  }`}
-                >
-                  <Icon className="w-3.5 h-3.5" />
-                  {label}
-                </NavLink>
-              )
-            })}
+          <div className="absolute bottom-[58px] right-2 w-44 rounded-xl border border-border/60 bg-card/95 backdrop-blur p-1.5 shadow-xl max-h-[60vh] overflow-y-auto scrollbar">
+            {mobileMoreGroups.map((group, gi) => (
+              <div key={group.label} className={gi > 0 ? 'mt-1.5 pt-1.5 border-t border-border/40' : ''}>
+                <div className="px-2.5 py-1 text-[10px] font-semibold tracking-wide text-muted-foreground/60">{group.label}</div>
+                {group.items.map(({ to, icon: Icon, label }) => {
+                  const isActive = location.pathname.startsWith(to)
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      onClick={() => setMobileMoreOpen(false)}
+                      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg text-[12px] transition-colors ${
+                        isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground hover:bg-accent/60'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      {label}
+                    </NavLink>
+                  )
+                })}
+              </div>
+            ))}
           </div>
         )}
       </nav>

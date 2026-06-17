@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { Check, Eye, EyeOff, Plus, Pencil, Trash2, Star, Send, Cpu, Play, Download, Upload, FileJson, BarChart3, TrendingUp } from 'lucide-react'
+import { Check, Eye, EyeOff, Plus, Pencil, Trash2, Star, Send, Cpu, Play, Download, Upload, FileJson, BarChart3, TrendingUp, ShieldCheck, ChevronRight } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { fetchAPI, type AIService, type AIModel, type NotifyChannel } from '@panwatch/api'
 import { Input } from '@panwatch/base-ui/components/ui/input'
 import { Label } from '@panwatch/base-ui/components/ui/label'
@@ -975,6 +976,27 @@ export default function SettingsPage() {
           ) : (
             <div className="text-[12px] text-muted-foreground">暂无反馈数据</div>
           )}
+        </section>
+
+        {/* 交易规则入口（全局默认止盈止损等风控参数） */}
+        <section id="sec-trade-rules" className="card p-4 md:p-6 lg:col-span-12">
+          <Link
+            to="/trade-rules"
+            className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-accent/20 px-4 py-3 hover:border-primary/30 hover:bg-accent/30 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="h-9 w-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold text-foreground">交易规则</div>
+                <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
+                  入场区间、止损止盈折扣与模拟盘默认风控（作为策略未单独配置时的全局兜底）
+                </p>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+          </Link>
         </section>
 
       </div>
