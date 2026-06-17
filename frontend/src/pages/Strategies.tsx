@@ -1,12 +1,14 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { Activity, BarChart3, ChevronDown, ChevronUp, Play, RefreshCw, Save, Trophy } from 'lucide-react'
+import { Activity, BarChart3, ChevronDown, ChevronUp, Play, Plus, RefreshCw, Save, Trophy } from 'lucide-react'
 import {
   backtestsApi,
   recommendationsApi,
+  screenerApi,
   type BacktestEquityPoint,
   type BacktestRun,
   type BacktestStrategyMetric,
   type BacktestTrade,
+  type ScreenerFormulaItem,
   type StrategyCatalogItem,
 } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
@@ -89,6 +91,15 @@ export default function StrategiesPage() {
   const [backtestEquity, setBacktestEquity] = useState<BacktestEquityPoint[]>([])
   const [backtestMetrics, setBacktestMetrics] = useState<BacktestStrategyMetric[]>([])
   const [backtestTrades, setBacktestTrades] = useState<BacktestTrade[]>([])
+  // 新增策略(从选股公式)
+  const [addOpen, setAddOpen] = useState(false)
+  const [formulas, setFormulas] = useState<ScreenerFormulaItem[]>([])
+  const [addFormulaId, setAddFormulaId] = useState<number | null>(null)
+  const [addStopPct, setAddStopPct] = useState(8)        // %
+  const [addTargetPct, setAddTargetPct] = useState(15)   // %
+  const [addMaxHold, setAddMaxHold] = useState(5)        // 天
+  const [addPositionPct, setAddPositionPct] = useState(5) // %
+  const [addBusy, setAddBusy] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -107,6 +118,45 @@ export default function StrategiesPage() {
   }
 
   useEffect(() => { load() }, [])
+
+  const openAdd = async () => {
+    setAddOpen(v => !v)
+    if (!addOpen && formulas.length === 0) {
+      try {
+        const data = await screenerApi.listFormulas()
+        const rows = data.items || []
+        setFormulas(rows)
+        if (rows.length && addFormulaId == null) setAddFormulaId(rows[0].id)
+      } catch {
+        toast('加载选股公式失败', 'error')
+      }
+    }
+  }
+
+  const createFromFormula = async () => {
+    if (addFormulaId == null) {
+      toast('请选择一个选股公式', 'error')
+      return
+    }
+    setAddBusy(true)
+    try {
+      await recommendationsApi.registerScreenerStrategy(addFormulaId, {
+        position_pct: Math.max(0, addPositionPct) / 100,
+        max_holding_days: Math.max(1, Math.round(addMaxHold)),
+        risk: {
+          stop_loss_pct: Math.max(0, addStopPct) / 100,
+          target_profit_pct: Math.max(0, addTargetPct) / 100,
+        },
+      })
+      toast('已从选股公式创建策略', 'success')
+      setAddOpen(false)
+      await load()
+    } catch {
+      toast('创建策略失败', 'error')
+    } finally {
+      setAddBusy(false)
+    }
+  }
 
   const sortedItems = useMemo(() => {
     return [...items].sort((a, b) => {
@@ -263,6 +313,10 @@ export default function StrategiesPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button size="sm" className="h-8" onClick={openAdd}>
+            <Plus className="w-3.5 h-3.5" />
+            <span className="ml-1">新增策略</span>
+          </Button>
           <Button variant="outline" size="sm" className="h-8" onClick={() => setBacktestOpen(v => !v)}>
             <BarChart3 className="w-3.5 h-3.5" />
             <span className="ml-1">回测</span>
@@ -296,6 +350,79 @@ export default function StrategiesPage() {
           <div className="text-xl font-bold">{summary.screener}</div>
         </div>
       </div>
+
+      {addOpen && (
+        <div className="card p-4 space-y-4">
+          <div>
+            <h2 className="text-sm font-semibold">从选股公式创建策略</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              以一条已保存的选股公式作为入场信号,组合下面的止盈止损与仓位作为该策略的风控
+            </p>
+          </div>
+          {formulas.length === 0 ? (
+            <div className="text-xs text-muted-foreground">
+              暂无已保存的选股公式,请先到「选股」页保存一个公式。
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3 flex-1">
+                <label className="text-xs space-y-1 col-span-2 md:col-span-1">
+                  <span className="text-muted-foreground">选股公式</span>
+                  <select
+                    className="w-full h-9 px-2 rounded-lg border border-border bg-background text-sm"
+                    value={addFormulaId ?? ''}
+                    onChange={e => setAddFormulaId(Number(e.target.value))}
+                  >
+                    {formulas.map(f => (
+                      <option key={f.id} value={f.id}>{f.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-xs space-y-1">
+                  <span className="text-muted-foreground">止损 %</span>
+                  <input
+                    type="number" min={0} step={0.5}
+                    className="w-full h-9 px-2 rounded-lg border border-border bg-background text-sm"
+                    value={addStopPct}
+                    onChange={e => setAddStopPct(Number(e.target.value) || 0)}
+                  />
+                </label>
+                <label className="text-xs space-y-1">
+                  <span className="text-muted-foreground">止盈 %</span>
+                  <input
+                    type="number" min={0} step={0.5}
+                    className="w-full h-9 px-2 rounded-lg border border-border bg-background text-sm"
+                    value={addTargetPct}
+                    onChange={e => setAddTargetPct(Number(e.target.value) || 0)}
+                  />
+                </label>
+                <label className="text-xs space-y-1">
+                  <span className="text-muted-foreground">最大持仓天数</span>
+                  <input
+                    type="number" min={1} step={1}
+                    className="w-full h-9 px-2 rounded-lg border border-border bg-background text-sm"
+                    value={addMaxHold}
+                    onChange={e => setAddMaxHold(Number(e.target.value) || 1)}
+                  />
+                </label>
+                <label className="text-xs space-y-1">
+                  <span className="text-muted-foreground">单笔仓位 %</span>
+                  <input
+                    type="number" min={0} step={1}
+                    className="w-full h-9 px-2 rounded-lg border border-border bg-background text-sm"
+                    value={addPositionPct}
+                    onChange={e => setAddPositionPct(Number(e.target.value) || 0)}
+                  />
+                </label>
+              </div>
+              <Button size="sm" className="h-9" onClick={createFromFormula} disabled={addBusy || addFormulaId == null}>
+                {addBusy ? <span className="w-3.5 h-3.5 border-2 border-current/30 border-t-current rounded-full animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                <span className="ml-1">{addBusy ? '创建中' : '创建策略'}</span>
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {backtestOpen && (
         <div className="card p-4 space-y-4">
