@@ -8,7 +8,12 @@ from src.collectors.kline_collector import (
     _fetch_eastmoney_intraday_klines,
     _fetch_eastmoney_klines,
 )
-from src.core.providers.base import KlineProvider, ProviderRequest, ProviderResponse
+from src.core.providers.base import (
+    KlineProvider,
+    ProviderRequest,
+    ProviderResponse,
+    is_intraday_interval,
+)
 from src.models.market import MarketCode
 
 
@@ -22,6 +27,7 @@ def _extra(req: ProviderRequest, key: str, default):
 class EastmoneyKlineProvider(KlineProvider):
     name = "eastmoney"
     supports_markets = {"CN", "HK", "US"}
+    supports_intraday = True  # 分时/五分(CN/HK)
 
     async def fetch(self, req: ProviderRequest) -> ProviderResponse:
         if not req.symbols:
@@ -37,7 +43,7 @@ class EastmoneyKlineProvider(KlineProvider):
         days = int(_extra(req, "days", 60) or 60)
         interval = str(_extra(req, "interval", "") or "").lower()
         try:
-            if interval in {"1min", "1minute", "minute", "min", "1", "5min", "5minute", "5m", "5"}:
+            if is_intraday_interval(interval):
                 if market not in (MarketCode.CN, MarketCode.HK):
                     return ProviderResponse(success=False, error="eastmoney intraday only supports CN/HK")
                 data = await asyncio.to_thread(

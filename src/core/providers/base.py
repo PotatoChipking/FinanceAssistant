@@ -93,15 +93,32 @@ class QuoteProvider(Provider):
     pass
 
 
+#: 分钟级(分时/五分)周期的各种别名。
+INTRADAY_INTERVALS = frozenset(
+    {"1min", "1minute", "minute", "min", "1", "5min", "5minute", "5m", "5"}
+)
+
+
+def is_intraday_interval(interval: str) -> bool:
+    return (interval or "1d").lower() in INTRADAY_INTERVALS
+
+
 class KlineProvider(Provider):
     """K 线 Provider 语义化基类。
 
     fetch() 应返回 ProviderResponse(success=True, data=list[KlineData]),
     KlineData 来自 src.collectors.kline_collector(date/open/close/high/low/volume)。
-    通过 req.extra 传 days(默认 60)。
+    通过 req.extra 传 days(默认 60)、interval(默认 1d)。
     """
 
-    pass
+    #: 是否支持分钟级(分时/五分)。默认仅日线及以上;Orchestrator 据此过滤候选,
+    #: 避免把分时请求发给只支持日线的 provider(否则会返回 "does not support interval")。
+    supports_intraday: bool = False
+
+    def supports_interval(self, interval: str) -> bool:
+        if is_intraday_interval(interval):
+            return self.supports_intraday
+        return True
 
 
 class NewsProvider(Provider):

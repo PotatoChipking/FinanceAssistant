@@ -169,6 +169,17 @@ class Orchestrator:
             m = self._metrics.setdefault(provider_name, _Metrics())
             m.record(success, latency_ms, error)
 
+    def _provider_can_serve(self, instance: Provider, req: ProviderRequest) -> bool:
+        """能力前置过滤:返回 False 的 provider 不会被尝试,也不计入失败指标。
+
+        默认全部可服务;子类可按 req 细分(如 K 线按 interval 过滤)。
+        """
+        return True
+
+    def _no_capable_provider_error(self, req: ProviderRequest) -> str:
+        """当所有候选都被 _provider_can_serve 过滤掉时的错误文案。"""
+        return f"no capable provider for market={req.market}"
+
     def _singleflight_lock(self, cache_key: str) -> asyncio.Lock:
         loop_key = f"{id(asyncio.get_running_loop())}:{cache_key}"
         with self._singleflight_guard:
@@ -239,10 +250,15 @@ class Orchestrator:
             )
 
         last_err = ""
+        attempted = 0
         for name, config in sources:
             instance = self._instances.get(name)
             if instance is None:
                 continue
+            if not self._provider_can_serve(instance, req):
+                # 能力不匹配(如日线 provider 收到分时请求):跳过,不污染失败指标
+                continue
+            attempted += 1
             t0 = time.monotonic()
             try:
                 resp = await instance.fetch(req)
@@ -269,6 +285,8 @@ class Orchestrator:
             self._record(name, success=False, latency_ms=latency_ms, error=err)
             last_err = err
 
+        if attempted == 0:
+            return ProviderResponse(success=False, error=self._no_capable_provider_error(req))
         return ProviderResponse(
             success=False, error=last_err or "all providers failed"
         )
@@ -282,6 +300,23 @@ class QuoteOrchestrator(Orchestrator):
 class KlineOrchestrator(Orchestrator):
     source_type = "kline"
     default_ttl_sec = 60.0  # K 线变更慢,1 分钟缓存
+
+    def _req_interval(self, req: ProviderRequest) -> str:
+        return str(_extra(req, "interval", "1d") or "1d").lower()
+
+    def _provider_can_serve(self, instance: Provider, req: ProviderRequest) -> bool:
+        # 仅把分时/五分请求发给声明支持分钟级的 provider(避免日线 provider 报
+        # "does not support interval");支持能力检查由 KlineProvider.supports_interval 提供。
+        supports_interval = getattr(instance, "supports_interval", None)
+        if callable(supports_interval):
+            return supports_interval(self._req_interval(req))
+        return True
+
+    def _no_capable_provider_error(self, req: ProviderRequest) -> str:
+        return (
+            f"no kline provider supports interval={self._req_interval(req)} "
+            f"for market={req.market}(分时/五分目前仅 CN/HK 经东方财富支持)"
+        )
 
     def _is_daily_cacheable(self, req: ProviderRequest) -> bool:
         interval = str(_extra(req, "interval", "1d") or "1d").lower()

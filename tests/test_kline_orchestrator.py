@@ -131,6 +131,65 @@ class TestKlineOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p1.call_count, 1)
 
 
+class TestKlineIntervalCapability(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp(prefix="kline-iv-")
+        engine = create_engine(
+            f"sqlite:///{self._tmpdir}/kline_cache.db",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(engine)
+        self._old_session_local = stock_kline_cache.SessionLocal
+        stock_kline_cache.SessionLocal = sessionmaker(bind=engine)
+
+    def tearDown(self):
+        stock_kline_cache.SessionLocal = self._old_session_local
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    async def test_intraday_skips_daily_only_provider(self):
+        """分时请求 — 跳过只支持日线的 provider,路由到支持分钟级的 provider"""
+        orch = KlineOrchestrator()
+        daily = _MockKlineProvider("daily")  # supports_intraday 默认 False
+        intraday = _MockKlineProvider("intraday")
+        intraday.supports_intraday = True
+        orch.register("daily", lambda cfg: daily)
+        orch.register("intraday", lambda cfg: intraday)
+        orch._get_or_create_instance("daily", {})
+        orch._get_or_create_instance("intraday", {})
+        _stub_sources(orch, ["daily", "intraday"])  # daily 优先级更高
+
+        resp = await orch.fetch(
+            ProviderRequest(
+                symbols=("600519",),
+                market="CN",
+                extra=(("days", 1), ("interval", "1min")),
+            )
+        )
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.provider, "intraday")
+        self.assertEqual(daily.call_count, 0)  # 日线 provider 完全不被尝试
+
+    async def test_intraday_no_capable_provider_clear_error(self):
+        """分时请求 — 无支持分钟级的 provider 时返回清晰错误,不报日线 provider 的拒绝信息"""
+        orch = KlineOrchestrator()
+        daily = _MockKlineProvider("daily")
+        orch.register("daily", lambda cfg: daily)
+        orch._get_or_create_instance("daily", {})
+        _stub_sources(orch, ["daily"])
+
+        resp = await orch.fetch(
+            ProviderRequest(
+                symbols=("600519",),
+                market="CN",
+                extra=(("days", 1), ("interval", "5min")),
+            )
+        )
+        self.assertFalse(resp.success)
+        self.assertEqual(daily.call_count, 0)
+        self.assertIn("5min", resp.error)
+        self.assertIn("no kline provider supports interval", resp.error)
+
+
 class TestTushareSoftDep(unittest.IsolatedAsyncioTestCase):
     async def test_tushare_missing_returns_error_not_raise(self):
         """tushare 未安装 — 应返回 success=False 而不抛异常"""
