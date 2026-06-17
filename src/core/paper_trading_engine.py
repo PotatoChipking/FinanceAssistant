@@ -91,6 +91,18 @@ def _config_float(config: dict | None, key: str, default: float) -> float:
         return float(default)
 
 
+def _risk_fraction(config: dict | None, key: str) -> float | None:
+    """读取策略级风控分数(run_config.risk.<key>),如 stop_loss_pct=0.08 表示 8%。
+
+    返回 None 表示未配置 → 调用方退回全局 trade_rules 兜底。与回测引擎保持一致。
+    """
+    risk = (config or {}).get("risk")
+    if not isinstance(risk, dict):
+        return None
+    val = _safe_float(risk.get(key))
+    return val if (val is not None and val > 0) else None
+
+
 def _position_quantity(*, market: str, price: float, available_cash: float, config: dict | None) -> int:
     pct = max(0.001, min(_config_float(config, "position_pct", 0.05), 1.0))
     budget = min(available_cash, available_cash * pct)
@@ -444,12 +456,15 @@ class PaperTradingEngine:
                     target_ratio = ((target_price - orig_mid) / orig_mid) if target_price else 0.15
                     stop_loss = round(entry_price * (1 + stop_ratio), 4)
                     target_price = round(entry_price * (1 + target_ratio), 4) if target_price else None
-            # 兜底：止损不合理时用默认 -8%
+            # 兜底优先级:信号显式价位 > 策略级风控(run_config.risk) > 全局 -8%/+15%
+            sl_frac = _risk_fraction(config, "stop_loss_pct")
+            tp_frac = _risk_fraction(config, "target_profit_pct")
             if not stop_loss or stop_loss <= 0 or stop_loss >= entry_price:
-                stop_loss = round(entry_price * (1 - stop_loss_pct), 4)
-            # 兜底：止盈不合理时用默认 +15%
+                pct = sl_frac if sl_frac is not None else stop_loss_pct
+                stop_loss = round(entry_price * (1 - pct), 4)
             if not target_price or target_price <= 0 or target_price <= entry_price:
-                target_price = round(entry_price * (1 + target_profit_pct), 4)
+                pct = tp_frac if tp_frac is not None else target_profit_pct
+                target_price = round(entry_price * (1 + pct), 4)
 
             pos = PaperTradingPosition(
                 stock_symbol=sig.stock_symbol,

@@ -127,6 +127,18 @@ def _rule_float(rules: dict, path: str, default: float) -> float:
     return _safe_float(cur, default)
 
 
+def _risk_fraction(config: dict | None, key: str) -> float | None:
+    """读取策略级风控分数(run_config.risk.<key>),如 stop_loss_pct=0.08 表示 8%。
+
+    返回 None 表示未配置 → 调用方退回全局 trade_rules 兜底。
+    """
+    risk = (config or {}).get("risk")
+    if not isinstance(risk, dict):
+        return None
+    val = _optional_float(risk.get(key))
+    return val if (val is not None and val > 0) else None
+
+
 def _sort_klines(klines: list[KlineData]) -> list[KlineData]:
     return sorted([k for k in klines if getattr(k, "date", "")], key=lambda k: k.date)
 
@@ -330,8 +342,11 @@ def _screener_formula_signals(db: Session, strategies: dict[str, StrategyCatalog
             )
             continue
         band = _rule_float(rules, "risk.entry_band_pct", 0.01)
-        stop_pct = _rule_float(rules, "risk.buy_fallback_stop_price_pct", 0.95)
-        target_pct = _rule_float(rules, "risk.buy_fallback_target_price_pct", 1.06)
+        # 价格档比例:优先策略级风控(run_config.risk),否则用全局兜底比例
+        sl_frac = _risk_fraction(strategy.run_config, "stop_loss_pct")
+        tp_frac = _risk_fraction(strategy.run_config, "target_profit_pct")
+        stop_pct = (1 - sl_frac) if sl_frac is not None else _rule_float(rules, "risk.buy_fallback_stop_price_pct", 0.95)
+        target_pct = (1 + tp_frac) if tp_frac is not None else _rule_float(rules, "risk.buy_fallback_target_price_pct", 1.06)
         holding_days = _config_int(strategy.run_config or {}, "max_holding_days", int((strategy.params or {}).get("horizon_days") or 3))
         for stock in universe:
             if not isinstance(stock, ScreenerStock):
@@ -448,12 +463,17 @@ def _execute_signal(
         buy_fee = entry_price * quantity * fee_pct
         entry_cost = entry_price * quantity + buy_fee
 
+    # 止损/止盈优先级:信号显式价位 > 策略级风控(run_config.risk) > 全局 trade_rules 兜底
+    sl_frac = _risk_fraction(config, "stop_loss_pct")
+    tp_frac = _risk_fraction(config, "target_profit_pct")
     stop_loss = signal.stop_loss
     if stop_loss is None:
-        stop_loss = entry_price * (1 - _rule_float(rules, "risk.paper_fallback_stop_loss_pct", 0.08))
+        pct = sl_frac if sl_frac is not None else _rule_float(rules, "risk.paper_fallback_stop_loss_pct", 0.08)
+        stop_loss = entry_price * (1 - pct)
     target_price = signal.target_price
     if target_price is None:
-        target_price = entry_price * (1 + _rule_float(rules, "risk.paper_fallback_target_profit_pct", 0.15))
+        pct = tp_frac if tp_frac is not None else _rule_float(rules, "risk.paper_fallback_target_profit_pct", 0.15)
+        target_price = entry_price * (1 + pct)
 
     exit_idx = min(len(klines) - 1, entry_idx + max_holding_days)
     exit_bar = klines[exit_idx]

@@ -326,6 +326,54 @@ def test_screener_formula_backtest_generates_trades_and_updates_ranking(monkeypa
         db.close()
 
 
+def test_risk_fraction_reads_run_config_risk_or_none():
+    assert backtest_engine._risk_fraction({"risk": {"stop_loss_pct": 0.08}}, "stop_loss_pct") == 0.08
+    assert backtest_engine._risk_fraction({"risk": {"target_profit_pct": 0.2}}, "target_profit_pct") == 0.2
+    # 未配置 / 非正 / 非法 → None(退回全局兜底)
+    assert backtest_engine._risk_fraction({}, "stop_loss_pct") is None
+    assert backtest_engine._risk_fraction({"risk": {}}, "stop_loss_pct") is None
+    assert backtest_engine._risk_fraction({"risk": {"stop_loss_pct": 0}}, "stop_loss_pct") is None
+    assert backtest_engine._risk_fraction({"risk": {"stop_loss_pct": "bad"}}, "stop_loss_pct") is None
+    assert backtest_engine._risk_fraction(None, "stop_loss_pct") is None
+
+
+def test_backtest_uses_per_strategy_stop_loss_over_global_fallback(monkeypatch, tmp_path):
+    """策略级 run_config.risk.stop_loss_pct 生效:用一个全局兜底(8%)不会触发、
+    但策略级(3%)会触发的止损价来区分两者。"""
+    Session = _session_factory(tmp_path)
+    _patch_sessions(monkeypatch, Session)
+    monkeypatch.setattr(
+        backtest_engine,
+        "fetch_klines_for_backtest",
+        lambda symbol, market, days: [
+            _k("2026-01-02", 9.8, 10.0),
+            _k("2026-01-05", 10.0, 10.0),           # 次日开盘 10.0 入场
+            _k("2026-01-06", 10.0, 9.6, high=10.2, low=9.5),  # low=9.5
+        ],
+    )
+    db = Session()
+    try:
+        # 策略级止损 3% → 止损价 9.7;全局兜底 8% → 9.2(不会被 9.5 触发)
+        db.add(_strategy(position_pct=0.05, risk={"stop_loss_pct": 0.03, "target_profit_pct": 0.50}))
+        # 信号本身不带止损/止盈 → 走策略级兜底
+        db.add(_signal(stop_loss=None, target_price=None, holding_days=5))
+        db.add(_run())
+        db.commit()
+    finally:
+        db.close()
+
+    backtest_engine.run_backtest("run-1")
+
+    db = Session()
+    try:
+        trade = db.query(BacktestTrade).filter(BacktestTrade.skipped.is_(False)).one()
+        assert trade.exit_reason == "stop_loss"
+        assert trade.exit_price == pytest.approx(9.7)  # 10.0 * (1 - 0.03)
+        assert trade.exit_date == "2026-01-06"
+    finally:
+        db.close()
+
+
 def test_backtest_api_create_and_missing_run(monkeypatch, tmp_path):
     Session = _session_factory(tmp_path)
     _patch_sessions(monkeypatch, Session)
