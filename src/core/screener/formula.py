@@ -27,17 +27,24 @@ SUPPORTED_FIELDS = {
 SUPPORTED_FUNCTIONS = {
     "MA",
     "EMA",
+    "SMA",
     "REF",
     "CROSS",
     "RSI",
     "MACD",
     "HHV",
     "LLV",
+    "SUM",
+    "STD",
+    "AVEDEV",
     "COUNT",
     "EVERY",
+    "EXIST",
+    "BARSLAST",
     "ABS",
     "MAX",
     "MIN",
+    "SQRT",
 }
 
 
@@ -400,6 +407,80 @@ def _macd(values: list[float | None], fast: int, slow: int, signal: int) -> tupl
     return dif, dea, hist
 
 
+def _sma(values: list[float | None], period: int, weight: int) -> list[float | None]:
+    """通达信 SMA(X,N,M): Y = (X*M + Y_前*(N-M)) / N，递归加权(KDJ/RSI 用)。"""
+    n = max(1, int(period))
+    m = max(1, int(weight))
+    out: list[float | None] = []
+    prev: float | None = None
+    for v in values:
+        if v is None:
+            out.append(prev)
+            continue
+        prev = v if prev is None else (v * m + prev * (n - m)) / n
+        out.append(prev)
+    return out
+
+
+def _sum(values: list[float | None], period: int) -> list[float | None]:
+    """N 日累加;N<=0 表示自起始累加。"""
+    if int(period) <= 0:
+        out: list[float | None] = []
+        running = 0.0
+        seen = False
+        for v in values:
+            if v is not None:
+                running += v
+                seen = True
+            out.append(running if seen else None)
+        return out
+    p = max(1, int(period))
+    out = []
+    for i in range(len(values)):
+        window = [x for x in values[max(0, i - p + 1): i + 1] if x is not None]
+        out.append(sum(window) if len(window) >= p else None)
+    return out
+
+
+def _std(values: list[float | None], period: int) -> list[float | None]:
+    """N 日总体标准差(与通达信 BOLL 口径一致,除以 N)。"""
+    p = max(1, int(period))
+    out: list[float | None] = []
+    for i in range(len(values)):
+        window = [x for x in values[max(0, i - p + 1): i + 1] if x is not None]
+        if len(window) < p:
+            out.append(None)
+        else:
+            mean = sum(window) / p
+            out.append((sum((x - mean) ** 2 for x in window) / p) ** 0.5)
+    return out
+
+
+def _avedev(values: list[float | None], period: int) -> list[float | None]:
+    """N 日平均绝对偏差(CCI 等用)。"""
+    p = max(1, int(period))
+    out: list[float | None] = []
+    for i in range(len(values)):
+        window = [x for x in values[max(0, i - p + 1): i + 1] if x is not None]
+        if len(window) < p:
+            out.append(None)
+        else:
+            mean = sum(window) / p
+            out.append(sum(abs(x - mean) for x in window) / p)
+    return out
+
+
+def _barslast(cond: list[bool]) -> list[float | None]:
+    """距上一次条件成立的周期数;从未成立返回 None。"""
+    out: list[float | None] = []
+    last: int | None = None
+    for i, c in enumerate(cond):
+        if c:
+            last = i
+        out.append(None if last is None else float(i - last))
+    return out
+
+
 class FormulaEvaluator:
     def __init__(self, klines: list[Any]):
         self.klines = sorted(klines, key=lambda k: getattr(k, "date", ""))
@@ -580,7 +661,32 @@ class FormulaEvaluator:
                     continue
                 out[i] = a[i - 1] <= b[i - 1] and a[i] > b[i]
             return out
-        if name in {"COUNT", "EVERY"}:
+        if name == "SMA":
+            if len(args) != 3:
+                raise FormulaError("SMA 需要 3 个参数 SMA(X,N,M)")
+            vals = _num_series(args[0], self.length)
+            n = int(float(_series(args[1], self.length)[-1]))
+            m = int(float(_series(args[2], self.length)[-1]))
+            return _sma(vals, n, m)
+        if name in {"SUM", "STD", "AVEDEV"}:
+            if len(args) != 2:
+                raise FormulaError(f"{name} 需要 2 个参数")
+            vals = _num_series(args[0], self.length)
+            period = int(float(_series(args[1], self.length)[-1]))
+            if name == "SUM":
+                return _sum(vals, period)
+            if name == "STD":
+                return _std(vals, period)
+            return _avedev(vals, period)
+        if name == "BARSLAST":
+            if len(args) != 1:
+                raise FormulaError("BARSLAST 需要 1 个参数")
+            return _barslast(_bool_series(args[0], self.length))
+        if name == "SQRT":
+            if len(args) != 1:
+                raise FormulaError("SQRT 需要 1 个参数")
+            return [None if x is None or x < 0 else x ** 0.5 for x in _num_series(args[0], self.length)]
+        if name in {"COUNT", "EVERY", "EXIST"}:
             if len(args) != 2:
                 raise FormulaError(f"{name} 需要 2 个参数")
             cond = _bool_series(args[0], self.length)
@@ -588,12 +694,12 @@ class FormulaEvaluator:
             out: list[Any] = []
             for i in range(self.length):
                 window = cond[max(0, i - period + 1): i + 1]
-                if len(window) < period:
-                    out.append(False if name == "EVERY" else 0)
-                elif name == "EVERY":
-                    out.append(all(window))
-                else:
+                if name == "COUNT":
                     out.append(sum(1 for x in window if x))
+                elif name == "EXIST":
+                    out.append(any(window))
+                else:  # EVERY
+                    out.append(all(window) if len(window) >= period else False)
             return out
         if name == "ABS":
             if len(args) != 1:
@@ -632,14 +738,19 @@ def function_catalog() -> dict[str, Any]:
         "functions": [
             {"name": "MA(X,N)", "description": "N日简单均线"},
             {"name": "EMA(X,N)", "description": "N日指数均线"},
+            {"name": "SMA(X,N,M)", "description": "通达信加权均线(KDJ/RSI 用)"},
             {"name": "REF(X,N)", "description": "N日前的值"},
             {"name": "CROSS(A,B)", "description": "A 上穿 B"},
             {"name": "RSI(C,N)", "description": "相对强弱指标"},
             {"name": "MACD(C,12,26,9)", "description": "MACD柱体，参数可省略"},
             {"name": "HHV(X,N) / LLV(X,N)", "description": "N日最高/最低"},
+            {"name": "SUM(X,N)", "description": "N日累加(N≤0 为自起始累加)"},
+            {"name": "STD(X,N)", "description": "N日标准差(BOLL 用)"},
+            {"name": "AVEDEV(X,N)", "description": "N日平均绝对偏差(CCI 用)"},
             {"name": "COUNT(COND,N)", "description": "N日内条件成立次数"},
-            {"name": "EVERY(COND,N)", "description": "N日内条件每天成立"},
-            {"name": "ABS / MAX / MIN", "description": "基础数值函数"},
+            {"name": "EVERY(COND,N) / EXIST(COND,N)", "description": "N日内每天/曾经成立"},
+            {"name": "BARSLAST(COND)", "description": "距上次条件成立的周期数"},
+            {"name": "ABS / MAX / MIN / SQRT", "description": "基础数值函数"},
         ],
         "examples": [
             {
@@ -651,8 +762,16 @@ def function_catalog() -> dict[str, Any]:
                 "formula": "C > REF(HHV(H,20),1) AND V > MA(V,5) * 1.5",
             },
             {
-                "name": "回踩20日线后转强",
-                "formula": "C > MA(C,20) AND REF(C,1) < REF(MA(C,20),1) AND C > O",
+                "name": "KDJ 金叉(K 上穿 D)",
+                "formula": "RSV := (C-LLV(L,9))/(HHV(H,9)-LLV(L,9))*100; CROSS(SMA(RSV,3,1), SMA(SMA(RSV,3,1),3,1))",
+            },
+            {
+                "name": "突破布林上轨(BOLL 20,2)",
+                "formula": "C > MA(C,20) + 2 * STD(C,20)",
+            },
+            {
+                "name": "CCI 超卖反弹",
+                "formula": "TP := (H+L+C)/3; CROSS((TP-MA(TP,14))/(0.015*AVEDEV(TP,14)), -100)",
             },
         ],
     }
