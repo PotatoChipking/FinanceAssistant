@@ -235,6 +235,15 @@ export default function StrategiesPage() {
     setBacktestTrades(tradesRes.items || [])
   }
 
+  // 只回测单个策略:打开回测面板并仅选中该策略,自动对齐其市场范围
+  const prepareBacktestFor = (item: StrategyCatalogItem) => {
+    setSelectedCodes([item.code])
+    const scope = (item.market_scope || 'ALL').toUpperCase()
+    if (scope === 'CN' || scope === 'HK' || scope === 'US') setBacktestMarket(scope)
+    setBacktestOpen(true)
+    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 50)
+  }
+
   const startBacktest = async () => {
     if (!selectedCodes.length) {
       toast('请至少选择一个策略', 'error')
@@ -647,6 +656,9 @@ export default function StrategiesPage() {
                       <td className="text-center py-2 px-2">{rankingBadge(item)}</td>
                       <td className="text-right py-2 pl-2">
                         <div className="flex items-center justify-end gap-1">
+                          <Button variant="ghost" size="icon" className="h-7 w-7" title="回测此策略" onClick={() => prepareBacktestFor(item)}>
+                            <BarChart3 className="w-3.5 h-3.5" />
+                          </Button>
                           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setExpandedCode(expanded ? '' : item.code)}>
                             {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                           </Button>
