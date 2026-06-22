@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -11,7 +11,6 @@ import {
   Clock3,
   Flame,
   Layers,
-  Loader2,
   Maximize2,
   Newspaper,
   RefreshCw,
@@ -395,6 +394,9 @@ export default function MarketEventsPage() {
   const [query, setQuery] = useState('')
   const [searching, setSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<BoardSearchItem[]>([])
+  const [showBoardDropdown, setShowBoardDropdown] = useState(false)
+  const boardSearchTimer = useRef<ReturnType<typeof setTimeout>>()
+  const boardSearchRef = useRef<HTMLDivElement>(null)
   const [selectedLeader, setSelectedLeader] = useState<SectorLeader | null>(null)
   const [selectedEventId, setSelectedEventId] = useState('')
   const [boardViewMode, setBoardViewModeState] = useState<'compact' | 'full'>(() => {
@@ -496,17 +498,31 @@ export default function MarketEventsPage() {
     loadWatchlist()
   }, [loadWatchlist])
 
-  const searchBoards = async () => {
+  const doBoardSearch = async (q: string) => {
+    if (q.trim().length < 1) {
+      setSearchResults([])
+      setShowBoardDropdown(false)
+      return
+    }
     setSearching(true)
     setBoardError('')
     try {
-      const rows = await marketEventsApi.searchBoards({ q: query, limit: 20 })
+      const rows = await marketEventsApi.searchBoards({ q, limit: 20 })
       setSearchResults(rows)
+      setShowBoardDropdown(rows.length > 0)
     } catch (err: any) {
       setBoardError(err?.message || '搜索板块失败')
+      setSearchResults([])
+      setShowBoardDropdown(false)
     } finally {
       setSearching(false)
     }
+  }
+
+  const handleBoardSearchInput = (value: string) => {
+    setQuery(value)
+    clearTimeout(boardSearchTimer.current)
+    boardSearchTimer.current = setTimeout(() => doBoardSearch(value), 400)
   }
 
   const addBoard = async (board: BoardSearchItem) => {
@@ -519,11 +535,22 @@ export default function MarketEventsPage() {
       })
       setQuery('')
       setSearchResults([])
+      setShowBoardDropdown(false)
       await loadWatchlist(true)
     } catch (err: any) {
       setBoardError(err?.message || '添加板块失败')
     }
   }
+
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (boardSearchRef.current && !boardSearchRef.current.contains(e.target as Node)) {
+        setShowBoardDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [])
 
   const removeBoard = async (board: WatchedBoardItem) => {
     setBoardError('')
@@ -698,22 +725,43 @@ export default function MarketEventsPage() {
                 完整
               </button>
             </div>
-            <div className="relative w-full sm:w-[280px]">
+            <div className="relative w-full sm:w-[280px]" ref={boardSearchRef}>
               <Search className="absolute left-2.5 top-2.5 w-4 h-4 text-muted-foreground" />
               <Input
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') searchBoards()
-                }}
+                onChange={(e) => handleBoardSearchInput(e.target.value)}
+                onFocus={() => searchResults.length > 0 && setShowBoardDropdown(true)}
                 placeholder="搜索板块名称或代码"
                 className="pl-8"
+                autoComplete="off"
               />
+              {searching && <span className="absolute right-2.5 top-2.5 w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />}
+              {showBoardDropdown && searchResults.length > 0 && (
+                <div className="absolute z-50 mt-1 w-full max-h-64 overflow-auto scrollbar rounded-lg border border-border bg-card shadow-lg">
+                  {searchResults.map((item) => {
+                    const selected = watchedBoards.some((x) => x.board_code === item.board_code)
+                    return (
+                      <button
+                        key={item.board_code}
+                        type="button"
+                        disabled={selected}
+                        onClick={() => addBoard(item)}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <span className="flex-1 truncate text-foreground">{item.board_name}</span>
+                        <span className="font-mono text-[11px] text-muted-foreground">{item.board_code}</span>
+                        {item.change_pct != null && (
+                          <span className={`text-[12px] font-medium ${item.change_pct >= 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                            {formatPct(item.change_pct)}
+                          </span>
+                        )}
+                        {selected && <span className="text-[10px] text-muted-foreground">已关注</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
-            <Button variant="secondary" onClick={searchBoards} disabled={searching}>
-              {searching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-              搜索
-            </Button>
             <Button onClick={refreshBoards} disabled={boardsLoading || watchedBoards.length === 0}>
               <RefreshCw className={`w-4 h-4 ${boardsLoading ? 'animate-spin' : ''}`} />
               更新日K
@@ -724,34 +772,6 @@ export default function MarketEventsPage() {
         {boardError && (
           <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-[13px] text-destructive">
             {boardError}
-          </div>
-        )}
-
-        {searchResults.length > 0 && (
-          <div className="mt-4 rounded-lg border border-border/70 bg-background/60 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-[12px] text-muted-foreground">搜索结果</span>
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSearchResults([])}>
-                <X className="w-4 h-4" />
-              </Button>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {searchResults.map((item) => {
-                const selected = watchedBoards.some((x) => x.board_code === item.board_code)
-                return (
-                  <Button
-                    key={item.board_code}
-                    variant={selected ? 'secondary' : 'outline'}
-                    size="sm"
-                    className="h-8 px-2.5 text-[12px]"
-                    disabled={selected}
-                    onClick={() => addBoard(item)}
-                  >
-                    {item.board_name} {formatPct(item.change_pct)}
-                  </Button>
-                )
-              })}
-            </div>
           </div>
         )}
 
