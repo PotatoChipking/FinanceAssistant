@@ -1,10 +1,10 @@
-"""腾讯板块排行采集器。
+"""腾讯板块采集器(排行 + 日K)。
 
-数据源:proxy.finance.qq.com 的 getRank 接口(行业 hy / 概念 gn),
-作为东方财富 push2 板块排行不可用时的替代/主源。
+- 板块排行:proxy.finance.qq.com 的 getRank(行业 hy / 概念 gn)
+- 板块日K:web.ifzq.gtimg.cn 的 newfqkline(用 getRank 返回的 pt 板块代码)
 
-字段名按腾讯返回做了多重兜底(zdf/zd/cje 等),解析失败返回空列表,
-由上层回退到东方财富/合成板块,保证不比现状更差。
+作为东方财富 push2 板块接口不可用时的替代/主源。字段名按腾讯返回做了多重兜底,
+解析失败返回空,由上层回退东方财富/合成板块,保证不比现状更差。
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import logging
 from typing import Any
 
 import httpx
+
+from src.collectors.discovery_collector import BoardKline
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,10 @@ def _text(item: dict, keys: list[str]) -> str:
 
 
 class TencentBoardCollector:
-    """腾讯行业/概念板块排行。"""
+    """腾讯行业/概念板块排行与日K。"""
 
     RANK_API = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"
+    KLINE_API = "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get"
 
     def __init__(
         self,
@@ -55,7 +58,6 @@ class TencentBoardCollector:
 
     @staticmethod
     def _extract_rows(data: Any) -> list[dict]:
-        """从多种可能的结构里取出板块列表。"""
         payload = (data or {}).get("data") if isinstance(data, dict) else None
         if isinstance(payload, dict):
             for key in ("rank_list", "list", "rank", "data", "ranklist"):
@@ -66,17 +68,17 @@ class TencentBoardCollector:
             return payload
         return []
 
-    async def fetch_hot_boards(self, *, scope: str = "industry", limit: int = 20) -> list[dict]:
+    async def fetch_hot_boards(self, *, scope: str = "industry", limit: int = 20, offset: int = 0) -> list[dict]:
         board_type = "gn" if (scope or "").strip().lower() in ("concept", "concepts", "gn") else "hy"
-        # getRank 没有「涨跌幅」排序枚举,这里按成交额取活跃板块池,涨幅交由上层客户端排序。
+        # getRank 没有「涨跌幅」排序枚举,按成交额取活跃板块池,涨幅交由上层客户端排序。
         params = {
             "board_type": board_type,
             "sort_type": "turnover",
             "direct": "down",
-            "offset": 0,
+            "offset": max(0, int(offset)),
             "count": max(1, min(int(limit), 100)),
         }
-        data = await self._get_json(params)
+        data = await self._request(self.RANK_API, params=params)
         rows = self._extract_rows(data)
         out: list[dict] = []
         for item in rows:
@@ -105,11 +107,47 @@ class TencentBoardCollector:
             )
         return out
 
-    async def _get_json(self, params: dict) -> dict:
+    async def fetch_board_klines(self, *, code: str, days: int = 120) -> list[BoardKline]:
+        board_code = (code or "").strip()
+        if not board_code:
+            return []
+        safe = max(1, min(int(days or 120), 500))
+        params = {"param": f"{board_code},day,,,{safe},qfq"}
+        data = await self._request(self.KLINE_API, params=params)
+        node = ((data or {}).get("data") or {}).get(board_code)
+        rows = (node or {}).get("day") or (node or {}).get("qfqday") or []
+        out: list[BoardKline] = []
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 5:
+                continue
+            try:
+                # 行格式: [date, open, close, high, low, volume, {}, pct, amount(万元), ...]
+                turnover = None
+                if len(row) > 8:
+                    try:
+                        turnover = float(row[8]) * 10000.0
+                    except (TypeError, ValueError):
+                        turnover = None
+                out.append(
+                    BoardKline(
+                        date=str(row[0]),
+                        open=float(row[1]),
+                        close=float(row[2]),
+                        high=float(row[3]),
+                        low=float(row[4]),
+                        volume=float(row[5]) if str(row[5]) not in ("", "-") else None,
+                        turnover=turnover,
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        return out[-safe:]
+
+    async def _request(self, url: str, *, params: dict) -> dict:
         headers = {
             "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             ),
             "Referer": "https://gu.qq.com/",
         }
@@ -125,7 +163,7 @@ class TencentBoardCollector:
                     headers=headers,
                     proxy=self.proxy,
                 ) as client:
-                    resp = await client.get(self.RANK_API, params=params)
+                    resp = await client.get(url, params=params)
                     resp.raise_for_status()
                     return resp.json()
             except Exception as exc:  # noqa: BLE001 - 上层据空结果回退
@@ -134,7 +172,7 @@ class TencentBoardCollector:
                     import asyncio
 
                     await asyncio.sleep(self.backoff_s * (attempt + 1))
-        logger.warning("Tencent board rank request failed: %s: %s", type(last_exc).__name__, last_exc)
+        logger.warning("Tencent board request failed: %s: %s", type(last_exc).__name__, last_exc)
         return {}
 
 
@@ -148,5 +186,11 @@ if __name__ == "__main__":  # 本地验证:python -m src.collectors.tencent_boar
             boards = await collector.fetch_hot_boards(scope=scope, limit=10)
             print(f"\n=== {scope}: {len(boards)} 个 ===")
             print(json.dumps(boards[:5], ensure_ascii=False, indent=2))
+        if boards:
+            code = boards[0]["code"]
+            klines = await collector.fetch_board_klines(code=code, days=120)
+            print(f"\n=== {code} 日K: {len(klines)} 根 ===")
+            for k in klines[-3:]:
+                print(" ", k)
 
     asyncio.run(_main())

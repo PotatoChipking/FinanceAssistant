@@ -920,8 +920,23 @@ async def _refresh_one_board(
 ) -> int:
     if market != "CN":
         return 0
-    coll = collector or _collector()
-    bars = await coll.fetch_board_klines(board_code=board_code, days=days)
+    # 优先腾讯板块日K(与轮动主线同源、同 pt 代码),拉不到再回退东方财富。
+    bars = []
+    source = "tencent"
+    try:
+        from src.collectors.tencent_board_collector import TencentBoardCollector
+
+        tcoll = TencentBoardCollector(proxy=_resolve_proxy() or None, retries=1)
+        bars = await tcoll.fetch_board_klines(code=board_code, days=days)
+    except Exception:
+        bars = []
+    if not bars:
+        coll = collector or _collector()
+        try:
+            bars = await coll.fetch_board_klines(board_code=board_code, days=days)
+            source = "eastmoney"
+        except Exception:
+            bars = []
     updated = 0
     now = datetime.now()
     for bar in bars:
@@ -943,7 +958,7 @@ async def _refresh_one_board(
         row.close = bar.close
         row.volume = bar.volume
         row.turnover = bar.turnover
-        row.source = "eastmoney"
+        row.source = source
         row.fetched_at = now
         updated += 1
     db.commit()
@@ -1041,6 +1056,17 @@ async def search_boards(
     limit: int = Query(20, ge=1, le=50),
 ):
     query = (q or "").strip().lower()
+
+    # 优先腾讯板块池(行业全量 + 概念分页),与轮动主线/板块K线同源;拉不到再回退东方财富。
+    tencent_rows = await _search_tencent_boards()
+    if tencent_rows:
+        rows = [
+            r for r in tencent_rows
+            if not query or query in f"{r['board_code']} {r['board_name']}".lower()
+        ]
+        rows.sort(key=lambda x: abs(float(x.get("change_pct") or 0.0)), reverse=True)
+        return rows[:limit]
+
     coll = _collector()
     industry_gainers, industry_turnover, concept_gainers, concept_turnover = await asyncio.gather(
         coll.fetch_hot_boards(market="CN", mode="gainers", limit=500, scope="industry"),
@@ -1075,6 +1101,35 @@ async def search_boards(
     return rows[:limit]
 
 
+async def _search_tencent_boards() -> list[dict]:
+    """腾讯行业(全量)+ 概念(分页)板块池,用于搜索过滤。失败返回空由上层回退。"""
+    from src.collectors.tencent_board_collector import TencentBoardCollector
+
+    collector = TencentBoardCollector(timeout_s=12.0, proxy=_resolve_proxy() or None, retries=1)
+    tasks = [
+        collector.fetch_hot_boards(scope="industry", limit=100, offset=0),
+        collector.fetch_hot_boards(scope="concept", limit=100, offset=0),
+        collector.fetch_hot_boards(scope="concept", limit=100, offset=100),
+        collector.fetch_hot_boards(scope="concept", limit=100, offset=200),
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    by_code: dict[str, dict] = {}
+    for result in results:
+        if isinstance(result, Exception) or not result:
+            continue
+        for board in result:
+            code = str(board.get("code") or "")
+            if code and code not in by_code:
+                by_code[code] = {
+                    "market": "CN",
+                    "board_code": code,
+                    "board_name": board.get("name"),
+                    "change_pct": board.get("change_pct"),
+                    "turnover": board.get("turnover"),
+                }
+    return list(by_code.values())
+
+
 @router.get("/boards/watchlist")
 def get_board_watchlist(db: Session = Depends(get_db)):
     rows = (
@@ -1091,7 +1146,7 @@ def add_board_to_watchlist(payload: WatchBoardRequest, db: Session = Depends(get
     market = (payload.market or "CN").strip().upper()
     if market != "CN":
         raise HTTPException(400, "v1 仅支持 A 股板块")
-    code = (payload.board_code or "").strip().upper()
+    code = (payload.board_code or "").strip()
     name = (payload.board_name or "").strip()
     if not code or not name:
         raise HTTPException(400, "board_code 和 board_name 不能为空")
@@ -1132,7 +1187,7 @@ def delete_board_from_watchlist(
     db: Session = Depends(get_db),
 ):
     market = (market or "CN").strip().upper()
-    code = (board_code or "").strip().upper()
+    code = (board_code or "").strip()  # 不转大写:腾讯板块代码为小写 pt…,东方财富已是大写 BK…
     row = (
         db.query(WatchedBoard)
         .filter(WatchedBoard.market == market, WatchedBoard.board_code == code)
@@ -1151,7 +1206,7 @@ async def refresh_watched_boards(payload: BoardRefreshRequest, db: Session = Dep
     if market != "CN":
         raise HTTPException(400, "v1 仅支持 A 股行业板块")
     days = max(30, min(int(payload.days or DEFAULT_BOARD_DAYS), 250))
-    codes = [x.strip().upper() for x in (payload.board_codes or []) if x.strip()]
+    codes = [x.strip() for x in (payload.board_codes or []) if x.strip()]
     if not codes:
         rows = (
             db.query(WatchedBoard)
@@ -1186,7 +1241,7 @@ async def get_board_kline(
     db: Session = Depends(get_db),
 ):
     market = (market or "CN").strip().upper()
-    code = (board_code or "").strip().upper()
+    code = (board_code or "").strip()  # 不转大写:腾讯板块代码为小写 pt…,东方财富已是大写 BK…
     if market != "CN":
         raise HTTPException(400, "v1 仅支持 A 股行业板块")
     rows = await _ensure_board_klines(db, market, code, days)
@@ -1207,7 +1262,7 @@ async def get_board_signals(
     db: Session = Depends(get_db),
 ):
     market = (market or "CN").strip().upper()
-    code = (board_code or "").strip().upper()
+    code = (board_code or "").strip()  # 不转大写:腾讯板块代码为小写 pt…,东方财富已是大写 BK…
     if market != "CN":
         raise HTTPException(400, "v1 仅支持 A 股行业板块")
     rows = await _ensure_board_klines(db, market, code, days)
