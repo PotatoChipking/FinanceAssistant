@@ -203,9 +203,136 @@ def evaluate_t_exit(
     target_price: float,
     stop_loss_price: float,
 ) -> str:
-    """返回 sell_t / invalidated / observe。"""
+    """正T(先买后卖)离场:返回 sell_t / invalidated / observe。"""
     if current_price <= stop_loss_price:
         return "invalidated"
     if current_price >= min(vwap, target_price):
         return "sell_t"
+    return "observe"
+
+
+def compute_base_position_vwap_t_short(
+    daily_klines: list[Any],
+    minute_klines: list[Any],
+    *,
+    min_score: int = 70,
+    min_vwap_deviation_pct: float = 0.003,
+    min_profit_pct: float = 0.008,
+    max_stop_pct: float = 0.015,
+) -> TSignalResult:
+    """计算高抛(倒T先卖)信号;正T 的镜像版本,卖出底仓等回落买回。"""
+    if len(daily_klines) < 25 or len(minute_klines) < 3:
+        return TSignalResult(False, "observe", 0, "K线数据不足", [], ["K线数据不足"], None, None, None, None, None, "missing", {})
+
+    daily = daily_klines[-80:]
+    minute = minute_klines[-320:]
+    closes = [_float(_value(row, "close")) for row in daily]
+    highs = [_float(_value(row, "high")) for row in daily]
+    if any(value is None for value in closes[-25:] + highs[-20:]):
+        return TSignalResult(False, "observe", 0, "日K字段不完整", [], ["日K字段不完整"], None, None, None, None, None, "missing", {})
+
+    current = _float(_value(minute[-1], "close"))
+    vwap, quality = compute_intraday_vwap(minute)
+    atr = _atr(daily, 14)
+    if current is None or current <= 0 or vwap is None or atr is None:
+        return TSignalResult(False, "observe", 0, "无法计算当前价、VWAP或ATR", [], ["关键指标缺失"], current, vwap, None, None, None, quality, {})
+
+    valid_closes = [float(x) for x in closes if x is not None]
+    valid_highs = [float(x) for x in highs if x is not None]
+    ma10 = sum(valid_closes[-10:]) / 10
+    ma20 = sum(valid_closes[-20:]) / 20
+    previous_ma20 = sum(valid_closes[-25:-5]) / 20
+    ma20_slope = (ma20 / previous_ma20 - 1.0) if previous_ma20 else 0.0
+    yesterday_high = valid_highs[-1]
+    resistance_candidates = [ma10, ma20, max(valid_highs[-20:]), yesterday_high]
+    above = [level for level in resistance_candidates if level >= current * 0.995]
+    resistance = min(above) if above else min(resistance_candidates, key=lambda level: abs(level - current))
+    resistance_distance = abs(current - resistance) / current
+    vwap_deviation = (current / vwap) - 1.0
+
+    last_three_highs = [_float(_value(row, "high")) for row in minute[-3:]]
+    previous_close = _float(_value(minute[-2], "close"), current) or current
+    reversal = bool(
+        all(value is not None for value in last_three_highs)
+        and last_three_highs[0] >= last_three_highs[1] >= last_three_highs[2]
+        and current < previous_close
+    )
+    trend_ok = current <= ma20 * 1.015 and ma20_slope <= 0.003
+    near_resistance = resistance_distance <= max(0.004, 0.15 * atr / current)
+    above_vwap = vwap_deviation >= max(min_vwap_deviation_pct, 0.2 * atr / current)
+
+    stop = max(resistance + 0.1 * atr, current + 0.2 * atr)
+    stop_risk = max((stop - current) / current, 0.0)
+    target = min(vwap, current * (1.0 - min_profit_pct))
+    reward_risk = (current - target) / max(stop - current, 1e-9)
+
+    evidence: list[str] = []
+    score = 0
+    if trend_ok:
+        score += 20
+        evidence.append("日线未单边强势上涨,适合高抛")
+    if near_resistance:
+        score += 20
+        evidence.append(f"当前价接近压力位 {resistance:.3f}")
+    if above_vwap:
+        score += 15
+        evidence.append(f"当前价高于 VWAP {vwap:.3f}")
+    if reversal:
+        score += 20
+        evidence.append("最近三根分钟K高点走低并出现滞涨")
+    if len(minute) >= 20:
+        score += 10
+        evidence.append("分钟数据覆盖满足盘中判断")
+    if reward_risk >= 1.0:
+        score += 15
+        evidence.append(f"预期盈亏比 {reward_risk:.2f}")
+
+    hard_blocks: list[str] = []
+    if not trend_ok:
+        hard_blocks.append("处于单边强势上涨,不宜高抛")
+    if stop_risk > max_stop_pct:
+        hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限")
+    if current >= resistance + 0.2 * atr:
+        hard_blocks.append("已有效突破关键压力")
+    action = "sell_open" if score >= min_score and not hard_blocks else "observe"
+    reason = "；".join(evidence) if action == "sell_open" else "；".join(hard_blocks or evidence or ["条件未满足"])
+    return TSignalResult(
+        valid=not hard_blocks,
+        action=action,
+        score=min(score, 100),
+        reason=reason,
+        evidence=evidence,
+        hard_blocks=hard_blocks,
+        current_price=round(current, 4),
+        vwap=round(vwap, 4),
+        support_price=round(resistance, 4),
+        stop_loss_price=round(stop, 4),
+        target_price=round(target, 4),
+        data_quality=quality,
+        metrics={
+            "ma10": round(ma10, 4),
+            "ma20": round(ma20, 4),
+            "ma20_slope": round(ma20_slope, 6),
+            "atr14": round(atr, 4),
+            "vwap_deviation": round(vwap_deviation, 6),
+            "resistance_distance": round(resistance_distance, 6),
+            "stop_risk": round(stop_risk, 6),
+            "reward_risk": round(reward_risk, 4),
+            "reversal": reversal,
+        },
+    )
+
+
+def evaluate_t_exit_short(
+    current_price: float,
+    *,
+    vwap: float,
+    target_price: float,
+    stop_loss_price: float,
+) -> str:
+    """倒T(先卖后买)离场:返回 buy_back / invalidated / observe。"""
+    if current_price >= stop_loss_price:
+        return "invalidated"
+    if current_price <= max(vwap, target_price):
+        return "buy_back"
     return "observe"

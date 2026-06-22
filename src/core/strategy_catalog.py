@@ -77,7 +77,7 @@ DEFAULT_STRATEGIES: tuple[StrategySpec, ...] = (
     StrategySpec(
         code="base_position_vwap_t",
         name="底仓 VWAP 回归做T",
-        description="仅对已有 A 股底仓生成日内低吸、回归 VWAP 卖出提醒，不自动交易",
+        description="对已有 A 股底仓生成日内做T提醒(正T低吸/倒T高抛双向),不自动交易",
         market_scope="CN",
         risk_level="medium",
         params={
@@ -88,6 +88,7 @@ DEFAULT_STRATEGIES: tuple[StrategySpec, ...] = (
             "min_vwap_deviation_pct": 0.003,
             "min_profit_pct": 0.008,
             "max_stop_pct": 0.015,
+            "direction": "both",  # both=双向 / long=仅正T / short=仅倒T
         },
         default_weight=1.0,
         run_config={"interval_seconds": 60, "requires_holding": True},

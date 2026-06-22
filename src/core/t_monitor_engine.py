@@ -13,8 +13,13 @@ from src.core.kline_service import fetch_klines_sync
 from src.core.notifier import NotifierManager
 from src.core.signals.base_position_vwap_t import (
     compute_base_position_vwap_t,
+    compute_base_position_vwap_t_short,
     evaluate_t_exit,
+    evaluate_t_exit_short,
 )
+
+# 倒T(先卖后买)相关的动作与状态
+_SHORT_ACTIONS = {"sell_open", "buy_back"}
 from src.core.strategy_catalog import get_strategy_profile_map
 from src.models.market import MARKETS, MarketCode
 from src.web.database import SessionLocal
@@ -56,15 +61,24 @@ class TMonitorEngine:
         notifier = NotifierManager()
         for channel in channels:
             notifier.add_channel(channel.type, channel.config or {})
-        action_label = {"buy_t": "做T机会", "sell_t": "做T卖出提醒", "invalidated": "做T信号失效"}.get(event.action, "做T提醒")
+        action_label = {
+            "buy_t": "做T机会(低吸)",
+            "sell_t": "做T卖出提醒(止盈)",
+            "sell_open": "做T机会(高抛/倒T)",
+            "buy_back": "做T买回提醒(倒T)",
+            "invalidated": "做T信号失效",
+        }.get(event.action, "做T提醒")
+        is_short = event.action in _SHORT_ACTIONS
+        level_label = "压力位" if is_short else "支撑位"
         title = f"【{action_label}】{stock.name} {stock.symbol}"
         content = "\n".join(
             [
                 "策略：底仓 VWAP 回归做T",
+                f"方向：{'倒T(先卖后买)' if is_short else '正T(先买后卖)'}",
                 f"信号：{event.action}",
                 f"当前价：{event.current_price:.3f}" if event.current_price is not None else "当前价：--",
                 f"VWAP：{event.vwap:.3f}" if event.vwap is not None else "VWAP：--",
-                f"支撑位：{event.support_price:.3f}" if event.support_price is not None else "支撑位：--",
+                f"{level_label}：{event.support_price:.3f}" if event.support_price is not None else f"{level_label}：--",
                 f"止损位：{event.stop_loss_price:.3f}" if event.stop_loss_price is not None else "止损位：--",
                 f"目标位：{event.target_price:.3f}" if event.target_price is not None else "目标位：--",
                 f"建议数量：{event.recommended_quantity} 股",
@@ -101,7 +115,11 @@ class TMonitorEngine:
             recommended_quantity=state.recommended_quantity,
             position_ratio=float((state.context or {}).get("position_ratio") or self.position_ratio),
             reason=reason,
-            invalidation="跌破止损位或日线趋势破坏时策略失效",
+            invalidation=(
+                "突破止损位或日线转强时策略失效"
+                if action in _SHORT_ACTIONS
+                else "跌破止损位或日线趋势破坏时策略失效"
+            ),
             data_quality=str((state.context or {}).get("data_quality") or ""),
             payload=state.context or {},
         )
@@ -138,6 +156,8 @@ class TMonitorEngine:
             db.flush()
 
         current = float(getattr(minute[-1], "close", 0) if not isinstance(minute[-1], dict) else minute[-1].get("close", 0))
+
+        # --- 离场态:正T 等卖出 / 倒T 等买回 ---
         if state.state == "waiting_exit":
             action = evaluate_t_exit(
                 current,
@@ -152,17 +172,33 @@ class TMonitorEngine:
                 return {"position_id": position.id, "status": action, "event_id": event.id}
             return {"position_id": position.id, "status": "waiting_exit"}
 
-        if state.state == "buy_t_notified" and state.signal_expires_at and state.signal_expires_at < _now():
+        if state.state == "waiting_buyback":
+            action = evaluate_t_exit_short(
+                current,
+                vwap=float(state.vwap or current),
+                target_price=float(state.target_price or current),
+                stop_loss_price=float(state.stop_loss_price or current),
+            )
+            state.current_price = current
+            if action in {"buy_back", "invalidated"}:
+                state.state = "buy_back_notified" if action == "buy_back" else "invalidated"
+                event = await self._create_event(db, state, position, stock, action, "价格回落 VWAP/目标位" if action == "buy_back" else "价格突破止损位")
+                return {"position_id": position.id, "status": action, "event_id": event.id}
+            return {"position_id": position.id, "status": "waiting_buyback"}
+
+        # --- 开仓通知态超过确认有效期则失效 ---
+        if state.state in {"buy_t_notified", "sell_open_notified"} and state.signal_expires_at and state.signal_expires_at < _now():
             state.state = "invalidated"
-            event = await self._create_event(db, state, position, stock, "invalidated", "低吸信号超过确认有效期")
+            event = await self._create_event(db, state, position, stock, "invalidated", "做T信号超过确认有效期")
             return {"position_id": position.id, "status": "invalidated", "event_id": event.id}
+
         max_cycles = max(1, int(params.get("max_cycles_per_day", self.max_cycles_per_day)))
         if state.state != "idle" or state.cycle_count >= max_cycles:
             return {"position_id": position.id, "status": state.state}
 
-        signal = compute_base_position_vwap_t(
-            daily,
-            minute,
+        # --- idle:按方向计算多/空入场信号,谁满足谁触发(同分优先正T) ---
+        direction = str(params.get("direction", "both") or "both").lower()
+        thresholds = dict(
             min_score=int(params.get("min_score", 70)),
             min_vwap_deviation_pct=float(params.get("min_vwap_deviation_pct", 0.003)),
             min_profit_pct=float(params.get("min_profit_pct", 0.008)),
@@ -170,11 +206,41 @@ class TMonitorEngine:
         )
         position_ratio = min(max(float(params.get("position_ratio", self.position_ratio)), 0.0), 0.3)
         sellable = max(int(position.sellable_quantity if position.sellable_quantity is not None else position.quantity), 0)
-        cash_quantity = int(float(account.available_funds or 0) / max(float(signal.current_price or 0), 0.01))
-        recommended = min(int(sellable * position_ratio), cash_quantity)
-        recommended = (recommended // 100) * 100
+
+        candidates: list[tuple[str, str, Any, int]] = []  # (side, action, signal, recommended)
+        display_signal: Any = None
+        if direction in {"both", "long"}:
+            long_signal = compute_base_position_vwap_t(daily, minute, **thresholds)
+            display_signal = display_signal or long_signal
+            if long_signal.action == "buy_t":
+                cash_quantity = int(float(account.available_funds or 0) / max(float(long_signal.current_price or 0), 0.01))
+                rec = (min(int(sellable * position_ratio), cash_quantity) // 100) * 100
+                if rec >= 100:
+                    candidates.append(("long", "buy_t", long_signal, rec))
+        if direction in {"both", "short"}:
+            short_signal = compute_base_position_vwap_t_short(daily, minute, **thresholds)
+            if display_signal is None or short_signal.score > getattr(display_signal, "score", 0):
+                display_signal = short_signal
+            if short_signal.action == "sell_open":
+                rec = (int(sellable * position_ratio) // 100) * 100  # 卖底仓,不占用现金
+                if rec >= 100:
+                    candidates.append(("short", "sell_open", short_signal, rec))
+
+        if not candidates:
+            if display_signal is not None:
+                state.score = display_signal.score
+                state.current_price = display_signal.current_price
+                state.vwap = display_signal.vwap
+                state.context = {**display_signal.to_dict(), "position_ratio": position_ratio}
+            return {"position_id": position.id, "status": "observe", "score": getattr(display_signal, "score", 0)}
+
+        # 同分优先正T(买):long 在前,稳定排序按分数降序
+        candidates.sort(key=lambda c: (c[2].score, c[0] == "long"), reverse=True)
+        side, action, signal, recommended = candidates[0]
+
         context = signal.to_dict()
         context["position_ratio"] = position_ratio
+        context["direction"] = side
         state.score = signal.score
         state.current_price = signal.current_price
         state.vwap = signal.vwap
@@ -182,17 +248,13 @@ class TMonitorEngine:
         state.stop_loss_price = signal.stop_loss_price
         state.target_price = signal.target_price
         state.recommended_quantity = recommended
-        state.context = context
-        if signal.action != "buy_t":
-            return {"position_id": position.id, "status": "observe", "score": signal.score}
-        if recommended < 100:
-            return {"position_id": position.id, "status": "skipped", "reason": "可卖底仓或可用资金不足100股"}
         state.entry_price = signal.current_price
+        state.context = context
         ttl_minutes = max(1, int(params.get("signal_ttl_minutes", self.signal_ttl_minutes)))
         state.signal_expires_at = _now() + timedelta(minutes=ttl_minutes)
-        state.state = "buy_t_notified"
-        event = await self._create_event(db, state, position, stock, "buy_t", signal.reason)
-        return {"position_id": position.id, "status": "buy_t", "score": signal.score, "event_id": event.id}
+        state.state = "buy_t_notified" if side == "long" else "sell_open_notified"
+        event = await self._create_event(db, state, position, stock, action, signal.reason)
+        return {"position_id": position.id, "status": action, "score": signal.score, "event_id": event.id}
 
     async def scan_once(
         self,
@@ -224,7 +286,7 @@ class TMonitorEngine:
                 except Exception as exc:
                     db.rollback()
                     results.append({"position_id": position.id, "status": "error", "reason": str(exc)})
-            triggered = sum(item.get("status") in {"buy_t", "sell_t", "invalidated"} for item in results)
+            triggered = sum(item.get("status") in {"buy_t", "sell_t", "sell_open", "buy_back", "invalidated"} for item in results)
             return {"scanned": len(results), "triggered": triggered, "results": results}
         finally:
             db.close()

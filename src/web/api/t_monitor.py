@@ -89,17 +89,24 @@ def confirm_buy(state_id: int, db: Session = Depends(get_db)) -> dict:
     state = db.query(TMonitorState).filter(TMonitorState.id == state_id).first()
     if not state:
         raise HTTPException(404, "做T状态不存在")
-    if state.state != "buy_t_notified":
-        raise HTTPException(400, "当前状态不能确认买入")
     from src.core.t_monitor_engine import _now
 
-    if state.signal_expires_at and state.signal_expires_at < _now():
-        state.state = "invalidated"
+    if state.state == "buy_t_notified":
+        # 正T:确认低吸买入,进入等待卖出
+        if state.signal_expires_at and state.signal_expires_at < _now():
+            state.state = "invalidated"
+            db.commit()
+            raise HTTPException(400, "低吸信号已过期，请等待下一次有效信号")
+        state.state = "waiting_exit"
         db.commit()
-        raise HTTPException(400, "低吸信号已过期，请等待下一次有效信号")
-    state.state = "waiting_exit"
-    db.commit()
-    return {"success": True, "state": state.state}
+        return {"success": True, "state": state.state}
+    if state.state == "buy_back_notified":
+        # 倒T:确认买回平仓,本轮完成
+        state.state = "completed"
+        state.cycle_count += 1
+        db.commit()
+        return {"success": True, "state": state.state, "cycle_count": state.cycle_count}
+    raise HTTPException(400, "当前状态不能确认买入")
 
 
 @router.post("/states/{state_id}/confirm-sell")
@@ -107,9 +114,21 @@ def confirm_sell(state_id: int, db: Session = Depends(get_db)) -> dict:
     state = db.query(TMonitorState).filter(TMonitorState.id == state_id).first()
     if not state:
         raise HTTPException(404, "做T状态不存在")
-    if state.state != "sell_t_notified":
-        raise HTTPException(400, "当前状态不能确认卖出")
-    state.state = "completed"
-    state.cycle_count += 1
-    db.commit()
-    return {"success": True, "state": state.state, "cycle_count": state.cycle_count}
+    from src.core.t_monitor_engine import _now
+
+    if state.state == "sell_t_notified":
+        # 正T:确认止盈卖出,本轮完成
+        state.state = "completed"
+        state.cycle_count += 1
+        db.commit()
+        return {"success": True, "state": state.state, "cycle_count": state.cycle_count}
+    if state.state == "sell_open_notified":
+        # 倒T:确认高抛开仓,进入等待买回
+        if state.signal_expires_at and state.signal_expires_at < _now():
+            state.state = "invalidated"
+            db.commit()
+            raise HTTPException(400, "高抛信号已过期，请等待下一次有效信号")
+        state.state = "waiting_buyback"
+        db.commit()
+        return {"success": True, "state": state.state}
+    raise HTTPException(400, "当前状态不能确认卖出")

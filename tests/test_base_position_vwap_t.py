@@ -3,8 +3,10 @@ from datetime import datetime, timedelta
 from src.collectors.kline_collector import KlineData
 from src.core.signals.base_position_vwap_t import (
     compute_base_position_vwap_t,
+    compute_base_position_vwap_t_short,
     compute_intraday_vwap,
     evaluate_t_exit,
+    evaluate_t_exit_short,
 )
 
 
@@ -87,3 +89,62 @@ def test_evaluate_t_exit_state():
     assert evaluate_t_exit(10.0, **params) == "sell_t"
     assert evaluate_t_exit(9.4, **params) == "invalidated"
     assert evaluate_t_exit(9.8, **params) == "observe"
+
+
+def _flat_daily_rows() -> list[dict]:
+    """横盘震荡日K(MA20 斜率约 0),用于倒T(高抛)信号。"""
+    rows = []
+    for index in range(40):
+        close = 10.04 if index % 2 else 9.96
+        rows.append(
+            {
+                "date": f"2026-05-{index + 1:02d}",
+                "open": close - 0.02,
+                "high": close + 0.10,
+                "low": close - 0.10,
+                "close": close,
+                "volume": 100_000,
+            }
+        )
+    return rows
+
+
+def _minute_rows_short() -> list[KlineData]:
+    """分钟价格冲高到压力位、高于 VWAP,末端高点走低滞涨。"""
+    start = datetime(2026, 6, 22, 9, 30)
+    rows = []
+    for index in range(30):
+        close = 9.92 + index * 0.0038
+        if index >= 27:
+            close = [10.035, 10.032, 10.028][index - 27]
+        volume = 1_000.0
+        rows.append(
+            KlineData(
+                date=(start + timedelta(minutes=index)).strftime("%Y-%m-%d %H:%M"),
+                open=close - 0.003,
+                high=close + 0.005,
+                low=close - 0.010,
+                close=close,
+                volume=volume,
+                amount=None,
+                source="tencent",
+            )
+        )
+    return rows
+
+
+def test_compute_base_position_vwap_t_short_produces_executable_levels():
+    result = compute_base_position_vwap_t_short(_flat_daily_rows(), _minute_rows_short())
+
+    assert result.action == "sell_open"
+    assert result.score >= 70
+    # 倒T:止损在上方、目标(买回)在下方,当前价高于 VWAP
+    assert result.target_price < result.current_price < result.stop_loss_price
+    assert result.vwap < result.current_price
+
+
+def test_evaluate_t_exit_short_state():
+    params = {"vwap": 10.0, "target_price": 9.9, "stop_loss_price": 10.5}
+    assert evaluate_t_exit_short(9.9, **params) == "buy_back"
+    assert evaluate_t_exit_short(10.6, **params) == "invalidated"
+    assert evaluate_t_exit_short(10.2, **params) == "observe"

@@ -19,7 +19,7 @@ interface TMonitorState {
   support_price: number | null
   stop_loss_price: number | null
   target_price: number | null
-  context?: { reason?: string; data_quality?: string }
+  context?: { reason?: string; data_quality?: string; direction?: string }
 }
 
 const stateLabels: Record<string, string> = {
@@ -27,9 +27,17 @@ const stateLabels: Record<string, string> = {
   buy_t_notified: '待确认低吸',
   waiting_exit: '等待反弹',
   sell_t_notified: '待确认卖出',
+  sell_open_notified: '待确认高抛',
+  waiting_buyback: '等待回落',
+  buy_back_notified: '待确认买回',
   completed: '今日完成',
   invalidated: '已失效',
 }
+
+// 倒T(先卖后买)涉及的状态
+const SHORT_STATES = ['sell_open_notified', 'waiting_buyback', 'buy_back_notified']
+const isShortRow = (row: TMonitorState) =>
+  row.context?.direction === 'short' || SHORT_STATES.includes(row.state)
 
 const price = (value: number | null) => value == null ? '--' : value.toFixed(3)
 
@@ -63,7 +71,13 @@ export default function TMonitorPanel() {
 
   const confirm = async (row: TMonitorState, action: 'buy' | 'sell') => {
     await fetchAPI(`/t-monitor/states/${row.id}/confirm-${action}`, { method: 'POST' })
-    toast(action === 'buy' ? '已确认买入 T 仓，开始监控卖点' : '已确认卖出，今日做 T 完成', 'success')
+    const msg: Record<string, string> = {
+      buy_t_notified: '已确认低吸买入，开始监控卖点',
+      sell_t_notified: '已确认卖出，今日做 T 完成',
+      sell_open_notified: '已确认高抛卖出，开始监控买点',
+      buy_back_notified: '已确认买回，今日做 T 完成',
+    }
+    toast(msg[row.state] || '已确认', 'success')
     await load()
   }
 
@@ -82,19 +96,29 @@ export default function TMonitorPanel() {
         <div className="rounded-lg border border-dashed border-border/60 py-5 text-center text-[12px] text-muted-foreground">尚无今日扫描结果</div>
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-2.5">
-          {rows.map(row => (
+          {rows.map(row => {
+            const short = isShortRow(row)
+            return (
             <div key={row.id} className="rounded-lg border border-border/50 bg-background/30 p-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-[13px] font-medium">{row.stock_name} <span className="font-mono text-muted-foreground">{row.stock_symbol}</span></div>
-                <div className="flex items-center gap-1.5"><Badge variant="secondary">T Score {Math.round(row.score)}</Badge><Badge>{stateLabels[row.state] || row.state}</Badge></div>
+                <div className="flex items-center gap-1.5">
+                  {row.state !== 'idle' && (
+                    <Badge variant="outline" className={short ? 'text-emerald-600 border-emerald-500/40' : 'text-rose-600 border-rose-500/40'}>
+                      {short ? '倒T' : '正T'}
+                    </Badge>
+                  )}
+                  <Badge variant="secondary">T Score {Math.round(row.score)}</Badge>
+                  <Badge>{stateLabels[row.state] || row.state}</Badge>
+                </div>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 mt-3">
                 {[
                   { label: '现价', value: price(row.current_price), cls: 'text-foreground' },
                   { label: 'VWAP', value: price(row.vwap), cls: 'text-foreground' },
-                  { label: '支撑', value: price(row.support_price), cls: 'text-foreground' },
-                  { label: '止损', value: price(row.stop_loss_price), cls: 'text-emerald-600' },
-                  { label: '目标', value: price(row.target_price), cls: 'text-rose-600' },
+                  { label: short ? '压力' : '支撑', value: price(row.support_price), cls: 'text-foreground' },
+                  { label: '止损', value: price(row.stop_loss_price), cls: short ? 'text-rose-600' : 'text-emerald-600' },
+                  { label: '目标', value: price(row.target_price), cls: short ? 'text-emerald-600' : 'text-rose-600' },
                 ].map(f => (
                   <div key={f.label} className="rounded-md bg-background/40 px-1.5 py-1">
                     <div className="text-[10px] leading-tight text-muted-foreground">{f.label}</div>
@@ -111,8 +135,11 @@ export default function TMonitorPanel() {
               {row.context?.reason && <div className="text-[11px] text-muted-foreground mt-2 line-clamp-2">{row.context.reason}</div>}
               {row.state === 'buy_t_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'buy')}>确认已低吸</Button>}
               {row.state === 'sell_t_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'sell')}>确认已卖出</Button>}
+              {row.state === 'sell_open_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'sell')}>确认已高抛</Button>}
+              {row.state === 'buy_back_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'buy')}>确认已买回</Button>}
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
