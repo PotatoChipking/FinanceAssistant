@@ -21,7 +21,7 @@ export default function KlineModal(props: {
         <DialogHeader>
           <DialogTitle>{props.title || (symbol ? `K线：${symbol}` : 'K线')}</DialogTitle>
           <DialogDescription>
-            {props.description || '分时/5分/日K/周K/月K切换，含MA/成交量/MACD。'}
+            {props.description || '分时/5分/日K/周K/月K切换，含MA/成交量/MACD与日线PA关键位。'}
           </DialogDescription>
         </DialogHeader>
         {symbol ? (

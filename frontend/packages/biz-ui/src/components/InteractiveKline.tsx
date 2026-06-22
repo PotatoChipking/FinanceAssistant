@@ -24,6 +24,21 @@ type KlinesResponse = {
   klines: KlineItem[]
 }
 
+type PriceActionOverlay = {
+  valid: boolean
+  score: number
+  tags: string[]
+  signals: Record<string, boolean>
+  levels: Record<string, number | null>
+  events: Array<{
+    date: string
+    type: 'breakout' | 'pullback_confirm' | string
+    text: string
+    price: number
+    level?: number | null
+  }>
+}
+
 type HoverTipRow = {
   date: string
   open: number
@@ -187,6 +202,17 @@ function addHistogram(chart: any, LW: any, options: any) {
   throw new Error('Histogram series API not available')
 }
 
+function applySeriesMarkers(series: any, LW: any, markers: any[]) {
+  if (!markers.length) return
+  if (typeof series?.setMarkers === 'function') {
+    series.setMarkers(markers)
+    return
+  }
+  if (typeof LW?.createSeriesMarkers === 'function') {
+    LW.createSeriesMarkers(series, markers)
+  }
+}
+
 export default function InteractiveKline(props: {
   symbol: string
   market: string
@@ -195,6 +221,7 @@ export default function InteractiveKline(props: {
   density?: 'normal' | 'compact' | 'mini'
   availableIntervals?: KlineInterval[]
   endpointBuilder?: (args: { symbol: string; market: string; days: number; interval: KlineInterval }) => string
+  showPriceAction?: boolean
 }) {
   const isCompact = props.density === 'compact'
   const isMini = props.density === 'mini'
@@ -208,6 +235,7 @@ export default function InteractiveKline(props: {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [data, setData] = useState<KlineItem[]>([])
+  const [priceAction, setPriceAction] = useState<PriceActionOverlay | null>(null)
   const [showRsi, setShowRsi] = useState(!dense)
   const [hoverTip, setHoverTip] = useState<HoverTip>({ visible: false, x: 0, y: 0, row: null })
   const intervalItems = useMemo(() => {
@@ -263,9 +291,22 @@ export default function InteractiveKline(props: {
       }
       if (!best.length && lastError) throw lastError
       setData(best)
+      if (interval === '1d' && props.showPriceAction !== false && !props.endpointBuilder) {
+        try {
+          const pa = await fetchAPI<PriceActionOverlay>(
+            `/klines/${encodeURIComponent(props.symbol)}/price-action?market=${encodeURIComponent(props.market)}&days=${encodeURIComponent(String(Math.max(120, fixedDays)))}`,
+          )
+          setPriceAction(pa?.valid ? pa : null)
+        } catch {
+          setPriceAction(null)
+        }
+      } else {
+        setPriceAction(null)
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载K线失败')
       setData([])
+      setPriceAction(null)
     } finally {
       setLoading(false)
     }
@@ -419,6 +460,35 @@ export default function InteractiveKline(props: {
       wickDownColor: '#10b981',
     })
     candleSeries.setData(series.candles)
+
+    if (interval === '1d' && priceAction?.valid) {
+      const priceLines = [
+        ['resistance', 'PA压力', '#f59e0b'],
+        ['support', 'PA支撑', '#0ea5e9'],
+        ['stop_loss', 'PA止损', '#ef4444'],
+        ['target_price', 'PA目标', '#10b981'],
+      ] as const
+      for (const [key, title, color] of priceLines) {
+        const price = Number(priceAction.levels?.[key])
+        if (!Number.isFinite(price) || price <= 0) continue
+        candleSeries.createPriceLine?.({ price, color, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title })
+      }
+      const markers = (priceAction.events || [])
+        .map(event => {
+          const time = parseBusinessDay(event.date)
+          if (!time) return null
+          const pullback = event.type === 'pullback_confirm'
+          return {
+            time,
+            position: 'belowBar',
+            color: pullback ? '#0ea5e9' : '#f59e0b',
+            shape: 'arrowUp',
+            text: event.text || (pullback ? 'PA回踩' : 'PA突破'),
+          }
+        })
+        .filter(Boolean)
+      applySeriesMarkers(candleSeries, LW, markers as any[])
+    }
 
     const volSeries = addHistogram(chart, LW, {
       priceScaleId: 'vol',
@@ -623,7 +693,7 @@ export default function InteractiveKline(props: {
         // ignore
       }
     }
-  }, [series, lwReady, showRsi, indexByDate, interval, chartHeight, macdHeight, rsiHeight])
+  }, [series, lwReady, showRsi, indexByDate, interval, chartHeight, macdHeight, rsiHeight, priceAction])
 
   return (
     <div className={`card ${dense ? 'p-2.5' : 'p-4 md:p-5'}`}>
@@ -686,6 +756,17 @@ export default function InteractiveKline(props: {
           <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">振幅</span> <span className="font-mono ml-1">{latestMetrics.ampPct.toFixed(2)}%</span></div>
           <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">区间高低</span> <span className="font-mono ml-1">{latestMetrics.maxHigh.toFixed(2)}/{latestMetrics.minLow.toFixed(2)}</span></div>
           <div className="rounded-lg bg-accent/20 px-2.5 py-2 text-[11px]"><span className="text-muted-foreground">均量</span> <span className="font-mono ml-1">{(latestMetrics.avgVol / 10000).toFixed(1)}万</span></div>
+        </div>
+      ) : null}
+
+      {!dense && interval === '1d' && priceAction?.valid ? (
+        <div className="mb-3 flex items-center gap-2 flex-wrap rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px]">
+          <span className="font-semibold text-foreground">Price Action {Math.round(priceAction.score || 0)}分</span>
+          {(priceAction.tags || []).map(tag => (
+            <span key={tag} className="rounded bg-accent/60 px-2 py-0.5 text-muted-foreground">
+              {{ pa_breakout: '突破', pa_pullback_confirm: '回踩确认', pa_trend_up: '上升趋势', pa_new_high: '阶段新高' }[tag] || tag}
+            </span>
+          ))}
         </div>
       ) : null}
       <div className="relative">

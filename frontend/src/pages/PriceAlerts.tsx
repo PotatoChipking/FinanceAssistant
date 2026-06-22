@@ -74,9 +74,16 @@ function conditionText(item: AlertConditionItem): string {
     turnover: '成交额',
     volume: '成交量',
     volume_ratio: '量比',
+    pa_score: 'PA评分',
+    pa_breakout: 'PA突破',
+    pa_pullback_confirm: 'PA回踩确认',
+    pa_structure_invalidated: 'PA结构失效',
   }
   if (item.op === 'between' && Array.isArray(item.value)) {
     return `${TYPE_LABEL[item.type] || item.type} ∈ [${item.value[0]}, ${item.value[1]}]`
+  }
+  if (['pa_breakout', 'pa_pullback_confirm', 'pa_structure_invalidated'].includes(item.type)) {
+    return `${TYPE_LABEL[item.type] || item.type}：${Number(item.value) === 1 ? '触发' : '未触发'}`
   }
   return `${TYPE_LABEL[item.type] || item.type} ${item.op} ${Array.isArray(item.value) ? item.value.join('~') : item.value}`
 }

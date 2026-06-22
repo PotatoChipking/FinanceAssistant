@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from src.collectors.kline_collector import KlineCollector
 from src.core.kline_service import fetch_kline_response_sync
 from src.core.providers import ProviderRequest, get_kline_orchestrator
+from src.core.signals.price_action import compute_price_action, price_action_params_from_dict
+from src.core.strategy_catalog import get_strategy_profile_map
 from src.models.market import MarketCode
 
 router = APIRouter()
@@ -250,6 +252,27 @@ def get_kline_summary(symbol: str, market: str = "CN"):
         "symbol": symbol,
         "market": market_code.value,
         "summary": summary,
+    }
+
+
+@router.get("/{symbol}/price-action")
+def get_price_action(symbol: str, market: str = "CN", days: int = 180):
+    """Return PA signals, levels and chart markers for a stock."""
+    market_code = _parse_market(market)
+    profile = get_strategy_profile_map().get("price_action") or {}
+    params = price_action_params_from_dict(profile.get("params"))
+    klines = _load_klines_from_orchestrator(
+        symbol,
+        market_code,
+        max(120, min(int(days or 180), 600)),
+        "1d",
+    )
+    result = compute_price_action(klines, params=params).to_dict()
+    return {
+        "symbol": symbol,
+        "market": market_code.value,
+        "enabled": bool(profile.get("enabled", True)),
+        **result,
     }
 
 

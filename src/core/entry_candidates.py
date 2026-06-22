@@ -13,6 +13,8 @@ from src.core.http import run_sync
 from src.core.json_safe import to_jsonable
 from src.core.kline_service import fetch_klines_sync
 from src.core.notifier import get_global_proxy
+from src.core.signals.price_action import compute_price_action, price_action_params_from_dict
+from src.core.strategy_catalog import get_strategy_profile_map
 from src.core.timezone import to_iso_with_tz, utc_now
 from src.core.trade_rules import get_trade_rules
 from src.models.market import MarketCode
@@ -63,6 +65,7 @@ STRATEGY_LABELS: dict[str, str] = {
     "volume_breakout": "放量突破",
     "momentum": "动量强化",
     "pullback": "回踩确认",
+    "price_action": "Price Action",
     "rebound": "超跌反弹",
     "watchlist_agent": "Agent建议",
 }
@@ -1435,6 +1438,38 @@ def refresh_entry_candidates(
         if key not in kline_summary_map:
             kline_summary_map[key] = {}
 
+    price_action_map: dict[str, dict] = {}
+    price_action_profile = get_strategy_profile_map().get("price_action") or {}
+    if bool(price_action_profile.get("enabled", True)):
+        pa_params = price_action_params_from_dict(price_action_profile.get("params"))
+        pa_candidates = sorted(
+            key_set,
+            key=lambda k: (
+                0 if input_map.get(k, {}).get("source_suggestion_id") else 1,
+                _candidate_sort_key(input_map.get(k) or {}),
+                k,
+            ),
+        )
+        safe_cap = max(0, int(max_kline_symbols))
+        if safe_cap > 0:
+            pa_candidates = pa_candidates[:safe_cap]
+        for key in pa_candidates:
+            market, symbol = key.split(":", 1)
+            try:
+                pa_result = compute_price_action(
+                    fetch_klines_sync(
+                        symbol,
+                        _to_market(market),
+                        days=max(120, pa_params.breakout_window + 61),
+                        interval="1d",
+                        cache_ttl_sec=300,
+                    ),
+                    params=pa_params,
+                )
+                price_action_map[key] = pa_result.to_dict()
+            except Exception as exc:
+                logger.debug("PA 计算失败(%s): %s", key, exc)
+
     db = SessionLocal()
     items: list[dict] = []
     try:
@@ -1454,6 +1489,13 @@ def refresh_entry_candidates(
                     }
                 )
             kline = kline_summary_map.get(key, {}) or {}
+            price_action = price_action_map.get(key, {}) or {}
+            pa_signals = price_action.get("signals") if isinstance(price_action.get("signals"), dict) else {}
+            pa_actionable = bool(
+                price_action.get("valid")
+                and pa_signals.get("risk_acceptable")
+                and (pa_signals.get("breakout") or pa_signals.get("pullback_confirm"))
+            )
             candidate_source = (inp.get("candidate_source") or "watchlist").strip()
             is_holding = key in holding_keys
 
@@ -1512,6 +1554,37 @@ def refresh_entry_candidates(
                     rules=rules,
                 )
 
+            if pa_actionable and action in ("buy", "add", "watch", "hold", "alert"):
+                strategy_tags.append("price_action")
+                pa_label = "PA回踩确认" if pa_signals.get("pullback_confirm") else "PA突破"
+                if action not in ("buy", "add"):
+                    action = "add" if is_holding else "buy"
+                    action_label = "准备加仓" if is_holding else "建仓"
+                    if suggestion_obj is not None:
+                        score, evidence = _score_suggestion(
+                            action=action,
+                            suggestion=suggestion_obj,
+                            quote=quote,
+                            kline=kline,
+                            rules=rules,
+                        )
+                    else:
+                        score, evidence = _score_market_scan_candidate(
+                            action=action,
+                            quote=quote,
+                            kline=kline,
+                            strategy_tags=strategy_tags,
+                            rules=rules,
+                        )
+                pa_score = _safe_float(price_action.get("score")) or 0.0
+                score = _clamp(score + min(10.0, max(0.0, (pa_score - 50.0) * 0.2)), 0.0, 100.0)
+                pa_evidence = [str(x) for x in (price_action.get("evidence") or []) if str(x).strip()]
+                evidence = list(dict.fromkeys([*evidence, *pa_evidence]))[:8]
+                signal = " / ".join([x for x in (signal, pa_label) if x])
+                pa_reason = "；".join(pa_evidence[:2])
+                if pa_reason:
+                    reason = "；".join([x for x in (reason, pa_reason) if x])
+
             if is_holding and action == "buy":
                 action = "add"
                 action_label = "准备加仓"
@@ -1538,6 +1611,19 @@ def refresh_entry_candidates(
                         continue
                     merged[k] = v
                 plan = merged
+            if pa_actionable:
+                levels = price_action.get("levels") if isinstance(price_action.get("levels"), dict) else {}
+                pa_close = _safe_float(levels.get("last_close"))
+                pa_anchor = _safe_float(levels.get("recent_breakout_level"))
+                if action in ("buy", "add") and pa_close is not None:
+                    if pa_anchor is not None:
+                        plan["entry_low"] = min(pa_anchor, pa_close)
+                        plan["entry_high"] = max(pa_anchor, pa_close)
+                    plan["stop_loss"] = _safe_float(levels.get("stop_loss"))
+                    plan["target_price"] = _safe_float(levels.get("target_price"))
+                    plan["support"] = _safe_float(levels.get("support"))
+                    plan["resistance"] = _safe_float(levels.get("resistance"))
+                    plan["invalidation"] = "跌破 PA 结构位或 ATR 止损位，价格行为结构失效"
             quality = _plan_quality(plan)
             confidence = round(score / 100.0, 3)
 
@@ -1590,6 +1676,7 @@ def refresh_entry_candidates(
                             "resistance": kline.get("resistance"),
                         },
                         "strategy_tags": strategy_tags,
+                        "price_action": price_action,
                         "is_holding_snapshot": bool(is_holding),
                         "source_meta": inp.get("meta") or {},
                     }

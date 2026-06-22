@@ -12,8 +12,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from src.collectors.kline_collector import KlineCollector
+from src.core.kline_service import fetch_klines_sync
 from src.core.notifier import NotifierManager
 from src.core.providers import ProviderRequest, get_quote_orchestrator
+from src.core.signals.price_action import compute_price_action, price_action_params_from_dict
+from src.core.strategy_catalog import get_strategy_profile_map
 from src.models.market import MarketCode, MARKETS
 from src.web.database import SessionLocal
 from src.web.models import NotifyChannel, PriceAlertHit, PriceAlertRule, Stock
@@ -107,6 +110,7 @@ class PriceAlertEngine:
     def __init__(self):
         self._quote_cache: dict[str, tuple[float, dict]] = {}
         self._kline_cache: dict[str, tuple[float, dict]] = {}
+        self._price_action_cache: dict[str, tuple[float, dict]] = {}
         self.quote_ttl_sec = 5.0
         self.kline_ttl_sec = 60.0
 
@@ -148,6 +152,29 @@ class PriceAlertEngine:
         self._kline_cache[key] = (now, summary or {})
         return summary or {}
 
+    async def _get_price_action_cached(self, market: MarketCode, symbol: str) -> dict:
+        key = f"{market.value}:{symbol}"
+        now = time.monotonic()
+        cached = self._price_action_cache.get(key)
+        if cached and now - cached[0] < self.kline_ttl_sec:
+            return cached[1]
+        try:
+            profile = get_strategy_profile_map().get("price_action") or {}
+            params = price_action_params_from_dict(profile.get("params"))
+            klines = await asyncio.to_thread(
+                fetch_klines_sync,
+                symbol,
+                market,
+                days=max(120, params.breakout_window + 61),
+                interval="1d",
+                cache_ttl_sec=60,
+            )
+            result = compute_price_action(klines, params=params).to_dict()
+        except Exception:
+            result = {}
+        self._price_action_cache[key] = (now, result)
+        return result
+
     async def _eval_condition(
         self,
         cond: dict,
@@ -171,6 +198,19 @@ class PriceAlertEngine:
         elif ctype == "volume_ratio":
             summary = await self._get_kline_summary_cached(market, symbol)
             left = _safe_float(summary.get("volume_ratio"))
+        elif ctype.startswith("pa_"):
+            pa = await self._get_price_action_cached(market, symbol)
+            signals = pa.get("signals") if isinstance(pa.get("signals"), dict) else {}
+            if ctype == "pa_score":
+                left = _safe_float(pa.get("score"))
+            elif ctype == "pa_breakout":
+                left = 1.0 if signals.get("breakout") else 0.0
+            elif ctype == "pa_pullback_confirm":
+                left = 1.0 if signals.get("pullback_confirm") else 0.0
+            elif ctype == "pa_structure_invalidated":
+                left = 1.0 if signals.get("structure_invalidated") else 0.0
+            else:
+                return False, {"type": ctype, "error": "unsupported_type"}
         else:
             return False, {"type": ctype, "error": "unsupported_type"}
 
@@ -220,6 +260,26 @@ class PriceAlertEngine:
             "conditions": results,
             "group_op": op,
         }
+        pa_types = sorted(
+            str(item.get("type") or "")
+            for item in items
+            if isinstance(item, dict) and str(item.get("type") or "").startswith("pa_")
+        )
+        if pa_types:
+            pa = await self._get_price_action_cached(market, symbol)
+            snapshot["price_action"] = {
+                "data_as_of": pa.get("data_as_of"),
+                "score": pa.get("score"),
+                "signals": pa.get("signals") or {},
+                "levels": pa.get("levels") or {},
+            }
+            matched_types = sorted(
+                str(item.get("type") or "")
+                for item in results
+                if item.get("matched") and str(item.get("type") or "").startswith("pa_")
+            )
+            if matched_types:
+                snapshot["signal_key"] = f"{pa.get('data_as_of') or 'unknown'}:{','.join(matched_types)}"
         return RuleEvalResult(matched=matched, hits=results, snapshot=snapshot)
 
     def _can_trigger(
@@ -285,9 +345,10 @@ class PriceAlertEngine:
         symbol = rule.stock.symbol
         name = rule.stock.name or symbol
         quote = snapshot.get("quote") or {}
+        price_action = snapshot.get("price_action") if isinstance(snapshot.get("price_action"), dict) else {}
         price = _safe_float(quote.get("current_price"))
         chg = _safe_float(quote.get("change_pct"))
-        title = f"【价格提醒】{name} ({symbol})"
+        title = f"【{'PA提醒' if price_action else '价格提醒'}】{name} ({symbol})"
         lines = [
             f"规则: {rule.name or f'提醒#{rule.id}'}",
             f"现价: {price:.2f}" if price is not None else "现价: --",
@@ -302,6 +363,13 @@ class PriceAlertEngine:
         if hit_lines:
             lines.append("命中条件:")
             lines.extend(hit_lines[:4])
+        if price_action:
+            levels = price_action.get("levels") if isinstance(price_action.get("levels"), dict) else {}
+            lines.append(f"PA评分: {price_action.get('score', '--')}")
+            for label, key in (("突破位", "recent_breakout_level"), ("止损位", "stop_loss"), ("目标位", "target_price")):
+                level = _safe_float(levels.get(key))
+                if level is not None:
+                    lines.append(f"{label}: {level:.2f}")
         content = "\n".join(lines)
 
         try:
@@ -374,6 +442,24 @@ class PriceAlertEngine:
                         }
                     )
                     continue
+
+                signal_key = str(ev.snapshot.get("signal_key") or "")
+                if signal_key:
+                    latest_hit = (
+                        db.query(PriceAlertHit)
+                        .filter(PriceAlertHit.rule_id == rule.id)
+                        .order_by(PriceAlertHit.id.desc())
+                        .first()
+                    )
+                    latest_snapshot = (
+                        latest_hit.trigger_snapshot
+                        if latest_hit is not None and isinstance(latest_hit.trigger_snapshot, dict)
+                        else {}
+                    )
+                    if str(latest_snapshot.get("signal_key") or "") == signal_key:
+                        skipped += 1
+                        items.append({"rule_id": rule.id, "status": "signal_duplicate"})
+                        continue
 
                 bucket = _minute_bucket(now)
                 hit = PriceAlertHit(

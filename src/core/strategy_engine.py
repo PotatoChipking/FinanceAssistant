@@ -282,6 +282,41 @@ def _pick_close_on_or_before(klines: list, target: date) -> float | None:
     return None
 
 
+def _evaluate_price_path(
+    klines: list,
+    *,
+    start: date,
+    target: date,
+    stop_loss: float | None,
+    target_price: float | None,
+) -> tuple[str | None, float | None]:
+    """Return the first stop/target hit after the signal day.
+
+    Daily bars cannot reveal intraday ordering. If both levels are touched on
+    the same bar, use the stop first as a conservative convention.
+    """
+
+    rows: list[tuple[date, float | None, float | None]] = []
+    for row in klines or []:
+        raw_date = row.get("date") if isinstance(row, dict) else getattr(row, "date", None)
+        day = _parse_day(raw_date)
+        if day is None or day <= start or day > target:
+            continue
+        raw_high = row.get("high") if isinstance(row, dict) else getattr(row, "high", None)
+        raw_low = row.get("low") if isinstance(row, dict) else getattr(row, "low", None)
+        rows.append((day, _safe_float(raw_high), _safe_float(raw_low)))
+    rows.sort(key=lambda item: item[0])
+
+    for _, high, low in rows:
+        hit_stop = stop_loss is not None and low is not None and low <= stop_loss
+        hit_target = target_price is not None and high is not None and high >= target_price
+        if hit_stop:
+            return "hit_stop", float(stop_loss)
+        if hit_target:
+            return "hit_target", float(target_price)
+    return None, None
+
+
 def _strategy_codes_for_candidate(row: EntryCandidate) -> list[str]:
     tags = [str(x).strip() for x in (row.strategy_tags or []) if str(x).strip()]
     codes: list[str] = []
@@ -1612,8 +1647,8 @@ def evaluate_strategy_outcomes(
                     stats["skipped_not_due"] += 1
                     continue
                 stats["eligible"] += 1
-                outcome_price = _pick_close_on_or_before(klines, target_day)
-                if outcome_price is None:
+                terminal_close = _pick_close_on_or_before(klines, target_day)
+                if terminal_close is None:
                     stats["skipped_no_price"] += 1
                     continue
                 base_price = None
@@ -1634,24 +1669,20 @@ def evaluate_strategy_outcomes(
                     stats["skipped_no_base_price"] += 1
                     status = "no_base_price"
                     ret = None
+                    outcome_price = terminal_close
                 else:
+                    path_status, path_price = _evaluate_price_path(
+                        klines,
+                        start=snap_day,
+                        target=target_day,
+                        stop_loss=_safe_float(s.stop_loss),
+                        target_price=_safe_float(s.target_price),
+                    )
+                    outcome_price = path_price if path_price is not None else terminal_close
                     ret = (outcome_price - base_price) / base_price * 100.0
-                    if s.target_price is not None and outcome_price >= float(s.target_price):
-                        status = "hit_target"
-                    elif s.stop_loss is not None and outcome_price <= float(s.stop_loss):
-                        status = "hit_stop"
-                    else:
-                        status = "evaluated"
-                hit_target = (
-                    bool(s.target_price is not None and outcome_price >= float(s.target_price))
-                    if status != "no_base_price"
-                    else None
-                )
-                hit_stop = (
-                    bool(s.stop_loss is not None and outcome_price <= float(s.stop_loss))
-                    if status != "no_base_price"
-                    else None
-                )
+                    status = path_status or "evaluated"
+                hit_target = status == "hit_target" if status != "no_base_price" else None
+                hit_stop = status == "hit_stop" if status != "no_base_price" else None
                 db.add(
                     StrategyOutcome(
                         signal_run_id=s.id,

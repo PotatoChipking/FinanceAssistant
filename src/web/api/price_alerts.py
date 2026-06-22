@@ -30,7 +30,7 @@ def _format_datetime(dt) -> str:
 
 
 class AlertConditionItem(BaseModel):
-    type: str = Field(..., description="price/change_pct/turnover/volume/volume_ratio")
+    type: str = Field(..., description="价格、量能或 PA 信号条件")
     op: str = Field(..., description=">=/<=/>/</==/between")
     value: float | list[float] = Field(..., description="阈值")
 
@@ -74,13 +74,26 @@ def _validate_condition_group(group: AlertConditionGroup):
         raise HTTPException(400, "condition_group.op 仅支持 and/or")
     if not group.items:
         raise HTTPException(400, "condition_group.items 不能为空")
-    allowed_types = {"price", "change_pct", "turnover", "volume", "volume_ratio"}
+    allowed_types = {
+        "price",
+        "change_pct",
+        "turnover",
+        "volume",
+        "volume_ratio",
+        "pa_score",
+        "pa_breakout",
+        "pa_pullback_confirm",
+        "pa_structure_invalidated",
+    }
     allowed_ops = {">=", "<=", ">", "<", "==", "=", "!=", "<>", "between", "in"}
+    boolean_pa_types = {"pa_breakout", "pa_pullback_confirm", "pa_structure_invalidated"}
     for it in group.items:
         if it.type not in allowed_types:
             raise HTTPException(400, f"不支持的条件类型: {it.type}")
         if it.op not in allowed_ops:
             raise HTTPException(400, f"不支持的运算符: {it.op}")
+        if it.type in boolean_pa_types and it.op not in ("==", "="):
+            raise HTTPException(400, f"{it.type} 仅支持等于判断")
         if it.op in ("between", "in"):
             if not isinstance(it.value, list) or len(it.value) != 2:
                 raise HTTPException(400, f"{it.type} 的 {it.op} 需要两个值")

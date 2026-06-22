@@ -6,7 +6,16 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@panwatch/base-ui/components/ui/button'
 
 export type RuleOp = 'and' | 'or'
-export type ConditionType = 'price' | 'change_pct' | 'turnover' | 'volume' | 'volume_ratio'
+export type ConditionType =
+  | 'price'
+  | 'change_pct'
+  | 'turnover'
+  | 'volume'
+  | 'volume_ratio'
+  | 'pa_score'
+  | 'pa_breakout'
+  | 'pa_pullback_confirm'
+  | 'pa_structure_invalidated'
 export type ConditionOp = '>=' | '<=' | '>' | '<' | '==' | 'between'
 
 export interface AlertConditionItem {
@@ -64,6 +73,14 @@ const TYPE_LABEL: Record<ConditionType, string> = {
   turnover: '成交额',
   volume: '成交量',
   volume_ratio: '量比',
+  pa_score: 'PA评分',
+  pa_breakout: 'PA突破',
+  pa_pullback_confirm: 'PA回踩确认',
+  pa_structure_invalidated: 'PA结构失效',
+}
+
+function isBooleanCondition(type: ConditionType): boolean {
+  return type === 'pa_breakout' || type === 'pa_pullback_confirm' || type === 'pa_structure_invalidated'
 }
 
 const buildDefaultForm = (stockId = 0): PriceAlertFormState => ({
@@ -401,7 +418,13 @@ export default function PriceAlertFormDialog(props: {
             {form.items.map((it, idx) => (
               <div key={idx} className="grid grid-cols-12 gap-2">
                 <div className="col-span-4">
-                  <Select value={it.type} onValueChange={(v) => updateCond(idx, { type: v as ConditionType })}>
+                  <Select
+                    value={it.type}
+                    onValueChange={(v) => {
+                      const type = v as ConditionType
+                      updateCond(idx, isBooleanCondition(type) ? { type, op: '==', value: 1 } : { type })
+                    }}
+                  >
                     <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {Object.entries(TYPE_LABEL).map(([k, label]) => (
@@ -411,7 +434,7 @@ export default function PriceAlertFormDialog(props: {
                   </Select>
                 </div>
                 <div className="col-span-3">
-                  <Select value={it.op} onValueChange={(v) => updateCond(idx, { op: v as ConditionOp })}>
+                  <Select value={it.op} disabled={isBooleanCondition(it.type)} onValueChange={(v) => updateCond(idx, { op: v as ConditionOp })}>
                     <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value=">=">{'>='}</SelectItem>
@@ -424,7 +447,15 @@ export default function PriceAlertFormDialog(props: {
                   </Select>
                 </div>
                 <div className="col-span-4">
-                  {it.op === 'between' ? (
+                  {isBooleanCondition(it.type) ? (
+                    <Select value={String(Array.isArray(it.value) ? it.value[0] : it.value)} onValueChange={(v) => updateCond(idx, { value: Number(v) })}>
+                      <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">触发</SelectItem>
+                        <SelectItem value="0">未触发</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : it.op === 'between' ? (
                     <div className="grid grid-cols-2 gap-1">
                       <Input
                         className="h-8"

@@ -1,6 +1,10 @@
+from datetime import date, timedelta
+
+import pytest
+
 from src.collectors.kline_collector import KlineData
 from src.models.market import MarketCode
-from src.web.api.klines import _load_klines, _load_klines_from_orchestrator
+from src.web.api.klines import _load_klines, _load_klines_from_orchestrator, get_price_action
 
 
 class FakeKlineCollector:
@@ -114,3 +118,40 @@ def test_api_monthly_interval_fetches_daily_from_orchestrator(monkeypatch):
     assert [k.date for k in out] == ["2026-01-30", "2026-02-02"]
     assert out[0].source == "mock"
     assert calls == [("600519", MarketCode.CN, 60, "1d", 60)]
+
+
+@pytest.mark.parametrize(("market", "symbol"), [("CN", "600519"), ("HK", "00700"), ("US", "AAPL")])
+def test_price_action_api_supports_all_markets(monkeypatch, market, symbol):
+    rows = []
+    for index in range(70):
+        close = 100 + index * 0.2
+        rows.append(
+            KlineData(
+                date=(date(2026, 1, 1) + timedelta(days=index)).isoformat(),
+                open=close - 0.2,
+                close=close,
+                high=close + 0.5,
+                low=close - 0.5,
+                volume=100,
+            )
+        )
+    level = max(x.high for x in rows[-21:-1])
+    rows[-1] = KlineData(
+        date=rows[-1].date,
+        open=level - 0.1,
+        close=level + 1,
+        high=level + 1.5,
+        low=level - 0.2,
+        volume=180,
+    )
+    monkeypatch.setattr("src.web.api.klines._load_klines_from_orchestrator", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(
+        "src.web.api.klines.get_strategy_profile_map",
+        lambda: {"price_action": {"enabled": True, "params": {}}},
+    )
+
+    result = get_price_action(symbol, market=market, days=180)
+
+    assert result["market"] == market
+    assert result["strategy_code"] == "price_action"
+    assert result["signals"]["breakout"] is True
