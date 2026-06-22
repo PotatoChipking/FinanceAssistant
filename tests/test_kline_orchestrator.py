@@ -189,8 +189,8 @@ class TestKlineIntervalCapability(unittest.IsolatedAsyncioTestCase):
         self.assertIn("5min", resp.error)
         self.assertIn("no kline provider supports interval", resp.error)
 
-    async def test_intraday_never_falls_back_to_eastmoney(self):
-        """腾讯分钟线失败时不得回退到需要代理的东方财富。"""
+    async def test_intraday_falls_back_to_eastmoney(self):
+        """腾讯分钟线失败时按 priority 回退到东方财富分时。"""
         orch = KlineOrchestrator()
         tencent = _MockKlineProvider(
             "tencent",
@@ -213,9 +213,10 @@ class TestKlineIntervalCapability(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertFalse(resp.success)
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.provider, "eastmoney")
         self.assertEqual(tencent.call_count, 1)
-        self.assertEqual(eastmoney.call_count, 0)
+        self.assertEqual(eastmoney.call_count, 1)
 
 
 class TestTushareSoftDep(unittest.IsolatedAsyncioTestCase):

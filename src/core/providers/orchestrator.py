@@ -32,7 +32,6 @@ from src.core.providers.base import (
     ProviderRequest,
     ProviderResponse,
     QuoteProvider,
-    is_intraday_interval,
 )
 from src.core.providers.cache import TTLCache
 
@@ -313,18 +312,16 @@ class KlineOrchestrator(Orchestrator):
     def _provider_can_serve(self, instance: Provider, req: ProviderRequest) -> bool:
         # 仅把分时/五分请求发给声明支持分钟级的 provider(避免日线 provider 报
         # "does not support interval");支持能力检查由 KlineProvider.supports_interval 提供。
-        interval = self._req_interval(req)
-        if is_intraday_interval(interval) and getattr(instance, "name", "") == "eastmoney":
-            return False
+        # 分时/五分按 priority 顺序在腾讯、东方财富之间自动 fallback。
         supports_interval = getattr(instance, "supports_interval", None)
         if callable(supports_interval):
-            return supports_interval(interval)
+            return supports_interval(self._req_interval(req))
         return True
 
     def _no_capable_provider_error(self, req: ProviderRequest) -> str:
         return (
             f"no kline provider supports interval={self._req_interval(req)} "
-            f"for market={req.market}(分时/五分仅由腾讯 CN/HK 行情支持)"
+            f"for market={req.market}(分时/五分仅 CN/HK 经腾讯/东方财富支持)"
         )
 
     def _is_daily_cacheable(self, req: ProviderRequest) -> bool:

@@ -236,7 +236,7 @@ def _fetch_eastmoney_intraday_klines(
         "lmt": str(need_limit),
         "end": "20500101",
         "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57",  # ...,volume,成交额
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
     }
     headers = {
@@ -264,11 +264,16 @@ def _fetch_eastmoney_intraday_klines(
             )
             out: list[KlineData] = []
             for row in raw or []:
-                # row format: "YYYY-MM-DD HH:mm,open,close,high,low,volume,..."
+                # row format: "YYYY-MM-DD HH:mm,open,close,high,low,volume,amount,..."
                 parts = str(row).split(",")
                 if len(parts) < 6:
                     continue
                 try:
+                    amount = (
+                        float(parts[6])
+                        if len(parts) > 6 and parts[6] not in (None, "", "-")
+                        else None
+                    )
                     out.append(
                         KlineData(
                             date=parts[0],
@@ -277,6 +282,7 @@ def _fetch_eastmoney_intraday_klines(
                             high=float(parts[3]),
                             low=float(parts[4]),
                             volume=float(parts[5]),
+                            amount=amount,
                             source="eastmoney",
                         )
                     )

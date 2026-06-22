@@ -94,6 +94,50 @@ def test_eastmoney_provider_fetches_intraday(monkeypatch):
     assert calls == [("600519", MarketCode.CN, "1min", 241)]
 
 
+def test_eastmoney_intraday_parses_amount(monkeypatch):
+    """东方财富分时回退应解析成交额(f57),供 VWAP 做T使用。"""
+    from src.collectors import kline_collector
+
+    class _FakeResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "data": {
+                    "klines": [
+                        # date,open,close,high,low,volume,amount
+                        "2026-06-22 09:31,10.00,10.10,10.20,9.90,100,101000",
+                        "2026-06-22 09:32,10.10,10.30,10.40,10.05,120,123600",
+                    ]
+                }
+            }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, *args, **kwargs):
+            return _FakeResp()
+
+    monkeypatch.setattr(kline_collector.httpx, "Client", _FakeClient)
+    # 用独立 symbol 规避模块级缓存
+    bars = kline_collector._fetch_eastmoney_intraday_klines(
+        "TESTAMT", MarketCode.CN, "1min", 241
+    )
+
+    assert len(bars) == 2
+    assert bars[-1].amount == 123600
+    assert bars[-1].volume == 120
+    assert all(b.source == "eastmoney" for b in bars)
+
+
 def test_stooq_provider_fetches_us_and_trims_days(monkeypatch):
     def fake_stooq(symbol):
         return [
