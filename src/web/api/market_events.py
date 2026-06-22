@@ -662,7 +662,75 @@ def _board_reason(board: dict, leaders: list[dict], max_turnover: float) -> tupl
     return round(flow_score, 1), state, label, f"{reason}{signal_map[state]}"
 
 
+async def _load_tencent_boards(limit: int) -> list[dict]:
+    """腾讯行业 + 概念板块排行,合并去重后构建轮动卡片。失败返回空由上层回退。"""
+    from src.collectors.tencent_board_collector import TencentBoardCollector
+
+    collector = TencentBoardCollector(timeout_s=12.0, proxy=_resolve_proxy() or None, retries=1)
+    try:
+        pool = min(max(limit * 3, 40), 100)
+        industry, concept = await asyncio.gather(
+            collector.fetch_hot_boards(scope="industry", limit=pool),
+            collector.fetch_hot_boards(scope="concept", limit=pool),
+        )
+    except Exception:
+        return []
+
+    merged: dict[str, dict] = {}
+    for board in [*(industry or []), *(concept or [])]:
+        code = str(board.get("code") or "")
+        if code:
+            merged.setdefault(code, board)
+    boards = list(merged.values())
+    if not boards:
+        return []
+
+    boards.sort(key=lambda x: -(float(x.get("change_pct") or 0.0)))
+    selected = boards[: max(1, min(int(limit), 20))]
+    max_turnover = max((_safe_number(x.get("turnover")) or 0.0) for x in selected) if selected else 0.0
+
+    enriched: list[dict] = []
+    for rank, board in enumerate(selected):
+        leaders: list[dict] = []
+        if board.get("leader_name"):
+            leaders = [
+                {
+                    "symbol": board.get("leader_code") or "",
+                    "market": "CN",
+                    "name": board.get("leader_name"),
+                    "price": None,
+                    "change_pct": board.get("leader_change_pct"),
+                    "turnover": None,
+                }
+            ]
+        score, state, label, reason = _board_reason(board, leaders, max_turnover)
+        enriched.append(
+            {
+                "code": board.get("code"),
+                "name": board.get("name"),
+                "change_pct": _safe_number(board.get("change_pct")),
+                "turnover": _safe_number(board.get("turnover")),
+                "rank_gainers": rank + 1,
+                "rank_turnover": None,
+                "flow_score": score,
+                "flow_state": state,
+                "flow_label": label,
+                "rotation_signal": reason,
+                "leaders": leaders,
+                "source": "tencent",
+            }
+        )
+    enriched.sort(key=lambda x: float(x.get("flow_score") or 0.0), reverse=True)
+    return enriched
+
+
 async def _load_boards(market: str, limit: int, db: Session) -> list[dict]:
+    # CN 优先用腾讯板块排行(行业+概念);拉不到再回退东方财富,最后才是合成板块。
+    if market == "CN":
+        tencent_boards = await _load_tencent_boards(limit)
+        if tencent_boards:
+            return tencent_boards
+
     collector = _collector()
 
     async def fetch(mode: str):
