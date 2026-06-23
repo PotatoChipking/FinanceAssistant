@@ -362,7 +362,7 @@ export default function InteractiveKline(props: {
   }, [lwReady])
 
   const series = useMemo(() => {
-    const klines = (data || [])
+    const allKlines = (data || [])
       .slice()
       .map(k => {
         const time = parseKlineTime(k.date)
@@ -371,6 +371,11 @@ export default function InteractiveKline(props: {
         return { ...k, time, timeKey } as SeriesKline
       })
       .filter(Boolean) as SeriesKline[]
+    // 分时图只展示「最新交易日」当天:分钟接口会返回约 1.3 天的数据,
+    // 跨日会让均价线(累计 VWAP)从昨日开盘累积而严重偏移。按当天截取并使均价线每日归零。
+    const klines = interval === '1min' && allKlines.length
+      ? allKlines.filter(k => String(k.date).slice(0, 10) === String(allKlines[allKlines.length - 1].date).slice(0, 10))
+      : allKlines
     const candles = klines.map(k => ({
       time: k.time,
       open: k.open,
@@ -403,7 +408,7 @@ export default function InteractiveKline(props: {
     const macd = computeMacd(closes)
     const rsi6 = computeRsi(closes, 6)
     return { klines, candles, volumes, ma5, ma10, ma20, avgPrice, volMa5, volMa10, macd, rsi6 }
-  }, [data])
+  }, [data, interval])
 
   const latestMetrics = useMemo(() => {
     if (!series.klines.length) return null
