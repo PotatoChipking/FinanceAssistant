@@ -51,6 +51,7 @@ type HoverTipRow = {
   ma5: number | null
   ma10: number | null
   ma20: number | null
+  avg: number | null
   macd: number | null
   signal: number | null
   rsi6: number | null
@@ -386,12 +387,22 @@ export default function InteractiveKline(props: {
     const ma5 = sma(closes, 5)
     const ma10 = sma(closes, 10)
     const ma20 = sma(closes, 20)
+    // 分时均价线:开盘至今累计成交额/累计成交量(缺成交额时用收盘价×量兜底),即盘中 VWAP 曲线。
+    let cumAmt = 0
+    let cumVol = 0
+    const avgPrice = klines.map(k => {
+      const vol = k.volume || 0
+      const amt = k.amount != null && k.amount > 0 ? k.amount : k.close * vol
+      cumVol += vol
+      cumAmt += amt
+      return cumVol > 0 ? cumAmt / cumVol : k.close
+    })
     const volRaw = klines.map(k => k.volume || 0)
     const volMa5 = sma(volRaw, 5)
     const volMa10 = sma(volRaw, 10)
     const macd = computeMacd(closes)
     const rsi6 = computeRsi(closes, 6)
-    return { klines, candles, volumes, ma5, ma10, ma20, volMa5, volMa10, macd, rsi6 }
+    return { klines, candles, volumes, ma5, ma10, ma20, avgPrice, volMa5, volMa10, macd, rsi6 }
   }, [data])
 
   const latestMetrics = useMemo(() => {
@@ -518,10 +529,6 @@ export default function InteractiveKline(props: {
     const volMa5Series = addLine(chart, LW, { priceScaleId: 'vol', color: 'rgba(245, 158, 11, 0.9)', lineWidth: 1, lastValueVisible: false, priceLineVisible: false })
     const volMa10Series = addLine(chart, LW, { priceScaleId: 'vol', color: 'rgba(14, 165, 233, 0.9)', lineWidth: 1, lastValueVisible: false, priceLineVisible: false })
 
-    const ma5Series = addLine(chart, LW, { color: 'rgba(99, 102, 241, 0.85)', lineWidth: 2, ...auxLabelOptions })
-    const ma10Series = addLine(chart, LW, { color: 'rgba(245, 158, 11, 0.85)', lineWidth: 2, ...auxLabelOptions })
-    const ma20Series = addLine(chart, LW, { color: 'rgba(14, 165, 233, 0.85)', lineWidth: 2, ...auxLabelOptions })
-
     const mapLine = (arr: Array<number | null>) =>
       series.klines
         .map((k, i) => {
@@ -530,11 +537,20 @@ export default function InteractiveKline(props: {
         })
         .filter(Boolean)
 
-    ma5Series.setData(mapLine(series.ma5) as any)
-    ma10Series.setData(mapLine(series.ma10) as any)
-    ma20Series.setData(mapLine(series.ma20) as any)
-    volMa5Series.setData(mapLine(series.volMa5) as any)
-    volMa10Series.setData(mapLine(series.volMa10) as any)
+    if (interval === '1min') {
+      // 分时图:只画均价线(开盘至今累计成交均价/VWAP),与同花顺/东方财富一致;不画 MA5/10/20。
+      const avgSeries = addLine(chart, LW, { color: '#f59e0b', lineWidth: 1.5, ...auxLabelOptions })
+      avgSeries.setData(mapLine(series.avgPrice) as any)
+    } else {
+      const ma5Series = addLine(chart, LW, { color: 'rgba(99, 102, 241, 0.85)', lineWidth: 2, ...auxLabelOptions })
+      const ma10Series = addLine(chart, LW, { color: 'rgba(245, 158, 11, 0.85)', lineWidth: 2, ...auxLabelOptions })
+      const ma20Series = addLine(chart, LW, { color: 'rgba(14, 165, 233, 0.85)', lineWidth: 2, ...auxLabelOptions })
+      ma5Series.setData(mapLine(series.ma5) as any)
+      ma10Series.setData(mapLine(series.ma10) as any)
+      ma20Series.setData(mapLine(series.ma20) as any)
+      volMa5Series.setData(mapLine(series.volMa5) as any)
+      volMa10Series.setData(mapLine(series.volMa10) as any)
+    }
 
     // MACD chart
     let macdChart: any = null
@@ -675,6 +691,7 @@ export default function InteractiveKline(props: {
           ma5: series.ma5[idx],
           ma10: series.ma10[idx],
           ma20: series.ma20[idx],
+          avg: series.avgPrice[idx] ?? null,
           macd: series.macd.macd[idx],
           signal: series.macd.signal[idx],
           rsi6: series.rsi6[idx],
@@ -727,6 +744,17 @@ export default function InteractiveKline(props: {
               {dataSource.includes('tencent') ? '腾讯行情' : dataSource}
             </span>
           ) : null}
+          <span className="flex items-center gap-2 text-[10px] font-normal text-muted-foreground">
+            {(interval === '1min'
+              ? [{ c: '#2563eb', l: '分时价' }, { c: '#f59e0b', l: '均价' }]
+              : [{ c: '#6366f1', l: 'MA5' }, { c: '#f59e0b', l: 'MA10' }, { c: '#0ea5e9', l: 'MA20' }]
+            ).map(item => (
+              <span key={item.l} className="inline-flex items-center gap-1">
+                <span className="inline-block h-0.5 w-3 rounded" style={{ backgroundColor: item.c }} />
+                {item.l}
+              </span>
+            ))}
+          </span>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {!dense && <Button variant={showRsi ? 'default' : 'secondary'} size="sm" className="h-8 px-2.5" onClick={() => setShowRsi(v => !v)}>
@@ -818,9 +846,15 @@ export default function InteractiveKline(props: {
               <span>最低价 <span className="font-mono text-foreground">{hoverTip.row.low.toFixed(2)}</span></span>
               <span>成交量 <span className="font-mono text-foreground">{hoverTip.row.volume.toLocaleString()}</span></span>
               <span>成交额 <span className="font-mono text-foreground">{hoverTip.row.amount != null ? hoverTip.row.amount.toLocaleString() : '--'}</span></span>
-              <span>{isIntradayInterval(interval) ? 'MA5' : '5日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
-              <span>{isIntradayInterval(interval) ? 'MA10' : '10日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
-              <span>{isIntradayInterval(interval) ? 'MA20' : '20日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
+              {interval === '1min' ? (
+                <span>均价 <span className="font-mono text-foreground">{hoverTip.row.avg != null ? hoverTip.row.avg.toFixed(2) : '--'}</span></span>
+              ) : (
+                <>
+                  <span>{interval === '5min' ? 'MA5' : '5日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma5 != null ? hoverTip.row.ma5.toFixed(2) : '--'}</span></span>
+                  <span>{interval === '5min' ? 'MA10' : '10日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma10 != null ? hoverTip.row.ma10.toFixed(2) : '--'}</span></span>
+                  <span>{interval === '5min' ? 'MA20' : '20日均线'} <span className="font-mono text-foreground">{hoverTip.row.ma20 != null ? hoverTip.row.ma20.toFixed(2) : '--'}</span></span>
+                </>
+              )}
               <span>MACD线 <span className="font-mono text-foreground">{hoverTip.row.macd != null ? hoverTip.row.macd.toFixed(3) : '--'}</span></span>
               <span>信号线 <span className="font-mono text-foreground">{hoverTip.row.signal != null ? hoverTip.row.signal.toFixed(3) : '--'}</span></span>
               <span>RSI强弱 <span className="font-mono text-foreground">{hoverTip.row.rsi6 != null ? hoverTip.row.rsi6.toFixed(1) : '--'}</span></span>
