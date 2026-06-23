@@ -9,6 +9,7 @@ import os
 import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -29,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 MAX_WATCHED_BOARDS = 8
 DEFAULT_BOARD_DAYS = 120
+
+# A 股事件统一按北京时间处理,避免服务器在 UTC 时区时日期/时间偏移。
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _now_bj() -> datetime:
+    return datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
 
 SOURCE_LABELS = {
     "xueqiu": "雪球",
@@ -150,7 +158,7 @@ def _collector() -> EastMoneyDiscoveryCollector:
 
 
 def _period_start(period: str) -> tuple[datetime, str]:
-    now = datetime.now()
+    now = _now_bj()
     key = (period or "week").lower()
     if key == "month":
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), "month"
@@ -162,7 +170,7 @@ def _period_start(period: str) -> tuple[datetime, str]:
 
 def _period_window(period: str) -> tuple[datetime, datetime, str]:
     start, key = _period_start(period)
-    now = datetime.now()
+    now = _now_bj()
     if key == "month":
         if start.month == 12:
             next_month = start.replace(year=start.year + 1, month=1, day=1)
@@ -204,31 +212,35 @@ def _amount_label(value: float | None) -> str:
 
 
 def _to_naive(dt: datetime) -> datetime:
+    # tz-aware 一律转北京时间再去 tz;naive 视为已是北京时间。
     if dt.tzinfo is None:
         return dt
-    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
 
 
 def _parse_newsnow_time(value) -> datetime:
     if value is None:
-        return datetime.now()
+        return _now_bj()
     if isinstance(value, (int, float)):
         ts = float(value)
-        if ts > 10_000_000_000:
+        if ts > 10_000_000_000:  # 毫秒时间戳
             ts = ts / 1000.0
         try:
-            return datetime.fromtimestamp(ts)
+            return datetime.fromtimestamp(ts, SHANGHAI_TZ).replace(tzinfo=None)
         except Exception:
-            return datetime.now()
+            return _now_bj()
     text = str(value).strip()
     if not text:
-        return datetime.now()
+        return _now_bj()
     if text.isdigit():
         return _parse_newsnow_time(float(text))
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+        return parsed  # 无 tz 视为已是北京时间
     except Exception:
-        return datetime.now()
+        return _now_bj()
 
 
 def _clean_newsnow_text(value: str) -> str:
@@ -575,7 +587,7 @@ def _build_events(
     limit: int,
     market: str = "CN",
 ) -> list[dict]:
-    now = datetime.now()
+    now = _now_bj()
     events: list[dict] = []
     start_cmp = _to_naive(start)
     for item in _dedupe_news(news_items):

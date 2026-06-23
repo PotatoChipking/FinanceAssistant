@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock3,
+  ExternalLink,
   Flame,
   Layers,
   Maximize2,
@@ -906,6 +907,17 @@ export default function MarketEventsPage() {
                         {selectedEvent.event_date} / {selectedEvent.event_category || selectedEvent.source_label}
                       </div>
                       <h3 className="mt-2 text-[15px] font-semibold leading-6">{selectedEvent.title}</h3>
+                      {selectedEvent.url && (
+                        <a
+                          href={selectedEvent.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="mt-2 inline-flex items-center gap-1 text-[12px] text-primary hover:underline"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          查看原文
+                        </a>
+                      )}
                       <div className="mt-3 rounded-lg bg-accent/30 p-3">
                         <div className="flex items-center gap-2 text-[12px] font-medium">
                           <Zap className="w-3.5 h-3.5 text-primary" />
