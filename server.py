@@ -1304,7 +1304,7 @@ async def lifespan(app):
         settings = Settings()
         t_monitor_scheduler = TMonitorScheduler(
             timezone=settings.app_timezone,
-            interval_seconds=60,
+            interval_seconds=10,
         )
         t_monitor_scheduler.start()
         logger.info("底仓做T盯盘调度器已启动")

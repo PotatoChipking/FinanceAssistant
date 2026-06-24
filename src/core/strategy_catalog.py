@@ -91,7 +91,7 @@ DEFAULT_STRATEGIES: tuple[StrategySpec, ...] = (
             "direction": "both",  # both=双向 / long=仅正T / short=仅倒T
         },
         default_weight=1.0,
-        run_config={"interval_seconds": 60, "requires_holding": True},
+        run_config={"interval_seconds": 10, "requires_holding": True},
     ),
     StrategySpec(
         code="rebound",

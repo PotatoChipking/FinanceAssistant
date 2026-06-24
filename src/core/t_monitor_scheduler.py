@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class TMonitorScheduler:
-    def __init__(self, timezone: str = "Asia/Shanghai", interval_seconds: int = 60):
+    def __init__(self, timezone: str = "Asia/Shanghai", interval_seconds: int = 10):
         self.scheduler = AsyncIOScheduler(timezone=timezone)
-        self.interval_seconds = max(30, int(interval_seconds))
+        self.interval_seconds = max(5, int(interval_seconds))
         self._running = False
 
     async def _scan_job(self) -> None:

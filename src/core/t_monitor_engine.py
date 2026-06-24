@@ -140,7 +140,7 @@ class TMonitorEngine:
     ) -> dict[str, Any]:
         daily, minute = await asyncio.gather(
             asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=120, interval="1d", cache_ttl_sec=60),
-            asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=320, interval="1min", cache_ttl_sec=30),
+            asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=320, interval="1min", cache_ttl_sec=8),
         )
         if not minute:
             return {"position_id": position.id, "status": "skipped", "reason": "腾讯分钟K为空"}
