@@ -162,6 +162,8 @@ class TMonitorEngine:
             min_profit_pct=float(params.get("min_profit_pct", 0.008)),
             max_stop_pct=float(params.get("max_stop_pct", 0.015)),
         )
+        # 离场方式:price=仅固定价触发(分数只显示) / price_or_score=价格或评分任一触发
+        score_exit = str(params.get("exit_mode", "price")).lower() == "price_or_score"
 
         # --- 离场态:实时重算"离场质量分"(平仓本质是反向入场),价格阈值或评分任一满足即触发 ---
         if state.state == "waiting_exit":
@@ -180,7 +182,7 @@ class TMonitorEngine:
                 state.state = "invalidated"
                 event = await self._create_event(db, state, position, stock, "invalidated", "价格跌破止损位")
                 return {"position_id": position.id, "status": "invalidated", "event_id": event.id}
-            if price_hit == "sell_t" or sell_sig.action == "sell_open":
+            if price_hit == "sell_t" or (score_exit and sell_sig.action == "sell_open"):
                 state.state = "sell_t_notified"
                 reason = "价格回归 VWAP/目标位" if price_hit == "sell_t" else f"高抛质量达标(分{sell_sig.score}):{sell_sig.reason}"
                 event = await self._create_event(db, state, position, stock, "sell_t", reason)
@@ -203,7 +205,7 @@ class TMonitorEngine:
                 state.state = "invalidated"
                 event = await self._create_event(db, state, position, stock, "invalidated", "价格突破止损位")
                 return {"position_id": position.id, "status": "invalidated", "event_id": event.id}
-            if price_hit == "buy_back" or buy_sig.action == "buy_t":
+            if price_hit == "buy_back" or (score_exit and buy_sig.action == "buy_t"):
                 state.state = "buy_back_notified"
                 reason = "价格回落 VWAP/目标位" if price_hit == "buy_back" else f"低吸质量达标(分{buy_sig.score}):{buy_sig.reason}"
                 event = await self._create_event(db, state, position, stock, "buy_back", reason)
