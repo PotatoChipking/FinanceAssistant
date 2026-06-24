@@ -381,5 +381,84 @@ class TMonitorEngine:
         finally:
             db.close()
 
+    async def execute_leg(self, state_id: int, action: str, price: float, quantity: int) -> dict[str, Any]:
+        """记录一腿实际成交(价+量)。开仓进入对应等待态;平仓计算 realized 并摊低持仓成本。
+
+        action: long_open / short_open / long_close / short_close
+        """
+        if action not in {"long_open", "short_open", "long_close", "short_close"}:
+            return {"success": False, "error": f"未知操作 {action}"}
+        try:
+            price = float(price)
+            quantity = int(quantity)
+        except (TypeError, ValueError):
+            return {"success": False, "error": "成交价/数量格式错误"}
+        if price <= 0 or quantity <= 0:
+            return {"success": False, "error": "成交价与数量需大于 0"}
+
+        profile = get_strategy_profile_map().get("base_position_vwap_t") or {}
+        params = profile.get("params") if isinstance(profile.get("params"), dict) else {}
+        min_profit = float(params.get("min_profit_pct", 0.008))
+        max_stop = float(params.get("max_stop_pct", 0.015))
+
+        db = SessionLocal()
+        try:
+            state = db.query(TMonitorState).filter(TMonitorState.id == state_id).first()
+            if not state:
+                return {"success": False, "error": "做T状态不存在"}
+            position = db.query(Position).filter(Position.id == state.position_id).first()
+            if not position:
+                return {"success": False, "error": "持仓不存在"}
+            ctx = dict(state.context or {})
+
+            if action in {"long_open", "short_open"}:
+                side = "long" if action == "long_open" else "short"
+                if side == "long":
+                    state.state = "waiting_exit"
+                    target = round(price * (1 + min_profit), 4)
+                    stop = round(price * (1 - max_stop), 4)
+                else:
+                    state.state = "waiting_buyback"
+                    target = round(price * (1 - min_profit), 4)
+                    stop = round(price * (1 + max_stop), 4)
+                state.entry_price = price
+                state.current_price = price
+                state.target_price = target
+                state.stop_loss_price = stop
+                state.recommended_quantity = quantity
+                state.signal_expires_at = None
+                ctx.update(direction=side, leg_entry_price=price, leg_qty=quantity, manual=True)
+                state.context = ctx
+                db.commit()
+                return {"success": True, "state": state.state, "target_price": target, "stop_loss_price": stop}
+
+            # 平仓:long_close / short_close
+            entry = float(ctx.get("leg_entry_price") or state.entry_price or 0.0)
+            qty = quantity or int(ctx.get("leg_qty") or 0)
+            if entry <= 0 or qty <= 0:
+                return {"success": False, "error": "缺少开仓价或数量,无法计算盈亏"}
+            realized = qty * (price - entry) if action == "long_close" else qty * (entry - price)
+            realized = round(realized, 2)
+
+            new_cost = None
+            if position.quantity and position.quantity > 0:
+                new_cost = (position.cost_price * position.quantity - realized) / position.quantity
+                new_cost = round(max(new_cost, 0.0001), 4)
+                position.cost_price = new_cost
+
+            state.state = "completed"
+            state.cycle_count = (state.cycle_count or 0) + 1
+            state.current_price = price
+            state.signal_expires_at = None
+            ctx.update(last_realized=realized, close_price=price, close_qty=qty)
+            state.context = ctx
+            db.commit()
+            return {"success": True, "state": state.state, "realized": realized, "new_cost_price": new_cost}
+        except Exception as exc:
+            db.rollback()
+            return {"success": False, "error": str(exc)}
+        finally:
+            db.close()
+
 
 ENGINE = TMonitorEngine()

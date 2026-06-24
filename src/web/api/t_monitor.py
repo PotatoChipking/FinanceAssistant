@@ -1,6 +1,7 @@
 """底仓 VWAP 做 T 盯盘 API。"""
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.core.t_monitor_engine import ENGINE
@@ -88,6 +89,21 @@ async def scan(position_id: int | None = None) -> dict:
 async def manual_action(state_id: int, action: str) -> dict:
     """手动驱动状态机:mark_long_open / mark_short_open / mark_done / reset。"""
     result = await ENGINE.manual_action(state_id, action)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error") or "操作失败")
+    return result
+
+
+class ExecuteLegRequest(BaseModel):
+    action: str  # long_open / short_open / long_close / short_close
+    price: float
+    quantity: int = 0
+
+
+@router.post("/states/{state_id}/execute")
+async def execute_leg(state_id: int, payload: ExecuteLegRequest) -> dict:
+    """记录一腿实际成交(价+量);平仓时摊低持仓成本。"""
+    result = await ENGINE.execute_leg(state_id, payload.action, payload.price, payload.quantity)
     if not result.get("success"):
         raise HTTPException(400, result.get("error") or "操作失败")
     return result

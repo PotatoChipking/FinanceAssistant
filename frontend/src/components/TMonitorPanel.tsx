@@ -3,7 +3,12 @@ import { RefreshCw } from 'lucide-react'
 import { fetchAPI } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Badge } from '@panwatch/base-ui/components/ui/badge'
+import { Input } from '@panwatch/base-ui/components/ui/input'
+import { Label } from '@panwatch/base-ui/components/ui/label'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@panwatch/base-ui/components/ui/dialog'
 import { useToast } from '@panwatch/base-ui/components/ui/toast'
+
+type LegAction = 'long_open' | 'short_open' | 'long_close' | 'short_close'
 
 interface TMonitorState {
   id: number
@@ -41,9 +46,19 @@ const isShortRow = (row: TMonitorState) =>
 
 const price = (value: number | null) => value == null ? '--' : value.toFixed(3)
 
+const LEG_TITLES: Record<LegAction, string> = {
+  long_open: '确认低吸买入',
+  short_open: '确认高抛卖出',
+  long_close: '确认止盈卖出',
+  short_close: '确认买回平仓',
+}
+
 export default function TMonitorPanel() {
   const [rows, setRows] = useState<TMonitorState[]>([])
   const [loading, setLoading] = useState(false)
+  const [leg, setLeg] = useState<{ row: TMonitorState; action: LegAction } | null>(null)
+  const [legPrice, setLegPrice] = useState('')
+  const [legQty, setLegQty] = useState('')
   const { toast } = useToast()
 
   const load = useCallback(async () => {
@@ -69,28 +84,42 @@ export default function TMonitorPanel() {
     }
   }
 
-  const confirm = async (row: TMonitorState, action: 'buy' | 'sell') => {
-    await fetchAPI(`/t-monitor/states/${row.id}/confirm-${action}`, { method: 'POST' })
-    const msg: Record<string, string> = {
-      buy_t_notified: '已确认低吸买入，开始监控卖点',
-      sell_t_notified: '已确认卖出，今日做 T 完成',
-      sell_open_notified: '已确认高抛卖出，开始监控买点',
-      buy_back_notified: '已确认买回，今日做 T 完成',
-    }
-    toast(msg[row.state] || '已确认', 'success')
-    await load()
+  const openLeg = (row: TMonitorState, action: LegAction) => {
+    setLeg({ row, action })
+    setLegPrice(row.current_price != null ? String(row.current_price) : '')
+    setLegQty(row.recommended_quantity ? String(row.recommended_quantity) : '')
   }
 
-  const manual = async (row: TMonitorState, action: 'mark_long_open' | 'mark_short_open' | 'mark_done' | 'reset') => {
+  const submitLeg = async () => {
+    if (!leg) return
+    const price = parseFloat(legPrice)
+    const quantity = parseInt(legQty)
+    if (!(price > 0) || !(quantity > 0)) {
+      toast('请输入有效的成交价与数量', 'error')
+      return
+    }
     try {
-      await fetchAPI(`/t-monitor/states/${row.id}/manual?action=${action}`, { method: 'POST' })
-      const labels: Record<string, string> = {
-        mark_long_open: '已标记低吸，开始盯卖点',
-        mark_short_open: '已标记高抛，开始盯买点',
-        mark_done: '已标记完成',
-        reset: '已重置',
+      const r = await fetchAPI<{ realized?: number; new_cost_price?: number }>(
+        `/t-monitor/states/${leg.row.id}/execute`,
+        { method: 'POST', body: JSON.stringify({ action: leg.action, price, quantity }) },
+      )
+      if (leg.action.endsWith('_close')) {
+        const profit = r.realized ?? 0
+        toast(`本轮做T ${profit >= 0 ? '盈利' : '亏损'} ${profit.toFixed(2)} 元${r.new_cost_price != null ? `，成本摊低至 ${r.new_cost_price}` : ''}`, 'success')
+      } else {
+        toast('已记录成交，开始监控对侧点位', 'success')
       }
-      toast(labels[action] || '已更新', 'success')
+      setLeg(null)
+      await load()
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '操作失败', 'error')
+    }
+  }
+
+  const reset = async (row: TMonitorState) => {
+    try {
+      await fetchAPI(`/t-monitor/states/${row.id}/manual?action=reset`, { method: 'POST' })
+      toast('已重置', 'success')
       await load()
     } catch (e) {
       toast(e instanceof Error ? e.message : '操作失败', 'error')
@@ -155,32 +184,60 @@ export default function TMonitorPanel() {
                 </div>
               )}
               <div className="mt-2 flex flex-wrap items-center gap-2">
-                {/* 自动流程的确认按钮 */}
-                {row.state === 'buy_t_notified' && <Button size="sm" onClick={() => confirm(row, 'buy')}>确认已低吸</Button>}
-                {row.state === 'sell_t_notified' && <Button size="sm" onClick={() => confirm(row, 'sell')}>确认已卖出</Button>}
-                {row.state === 'sell_open_notified' && <Button size="sm" onClick={() => confirm(row, 'sell')}>确认已高抛</Button>}
-                {row.state === 'buy_back_notified' && <Button size="sm" onClick={() => confirm(row, 'buy')}>确认已买回</Button>}
+                {/* 自动流程的确认按钮(点开后输入实际成交价+数量) */}
+                {row.state === 'buy_t_notified' && <Button size="sm" onClick={() => openLeg(row, 'long_open')}>确认已低吸</Button>}
+                {row.state === 'sell_t_notified' && <Button size="sm" onClick={() => openLeg(row, 'long_close')}>确认已卖出</Button>}
+                {row.state === 'sell_open_notified' && <Button size="sm" onClick={() => openLeg(row, 'short_open')}>确认已高抛</Button>}
+                {row.state === 'buy_back_notified' && <Button size="sm" onClick={() => openLeg(row, 'short_close')}>确认已买回</Button>}
 
-                {/* 等待态:手动标记完成 */}
-                {row.state === 'waiting_exit' && <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_done')}>我已卖出完成</Button>}
-                {row.state === 'waiting_buyback' && <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_done')}>我已买回完成</Button>}
+                {/* 等待态:手动标记完成(输入平仓价) */}
+                {row.state === 'waiting_exit' && <Button size="sm" variant="outline" onClick={() => openLeg(row, 'long_close')}>我已卖出完成</Button>}
+                {row.state === 'waiting_buyback' && <Button size="sm" variant="outline" onClick={() => openLeg(row, 'short_close')}>我已买回完成</Button>}
 
                 {/* 非活跃态:手动入场(策略没提示时,记录你的实际操作) */}
                 {['idle', 'completed', 'invalidated'].includes(row.state) && (
                   <>
-                    <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_long_open')}>我已低吸 → 盯卖点</Button>
-                    <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_short_open')}>我已高抛 → 盯买点</Button>
+                    <Button size="sm" variant="outline" onClick={() => openLeg(row, 'long_open')}>我已低吸 → 盯卖点</Button>
+                    <Button size="sm" variant="outline" onClick={() => openLeg(row, 'short_open')}>我已高抛 → 盯买点</Button>
                   </>
                 )}
 
                 {/* 重置:任何非 idle 态可清回观察 */}
-                {row.state !== 'idle' && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => manual(row, 'reset')}>重置</Button>}
+                {row.state !== 'idle' && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => reset(row)}>重置</Button>}
               </div>
             </div>
             )
           })}
         </div>
       )}
+
+      <Dialog open={!!leg} onOpenChange={(o) => { if (!o) setLeg(null) }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-[15px]">
+              {leg ? LEG_TITLES[leg.action] : ''}
+              {leg && <span className="ml-2 text-[12px] font-normal text-muted-foreground">{leg.row.stock_name} {leg.row.stock_symbol}</span>}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label>成交价</Label>
+              <Input value={legPrice} onChange={e => setLegPrice(e.target.value)} inputMode="decimal" className="font-mono mt-1" placeholder="实际成交价" />
+            </div>
+            <div>
+              <Label>数量(股)</Label>
+              <Input value={legQty} onChange={e => setLegQty(e.target.value)} inputMode="numeric" className="font-mono mt-1" placeholder="实际成交数量" />
+            </div>
+            {leg?.action.endsWith('_close') && (
+              <div className="text-[11px] text-muted-foreground">平仓后将按 数量×(卖出价−买入价) 计算做T盈亏,并摊低该持仓成本。</div>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" size="sm" onClick={() => setLeg(null)}>取消</Button>
+              <Button size="sm" onClick={submitLeg}>确认</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
