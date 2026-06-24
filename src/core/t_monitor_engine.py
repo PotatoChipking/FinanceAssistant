@@ -209,6 +209,7 @@ class TMonitorEngine:
 
         candidates: list[tuple[str, str, Any, int]] = []  # (side, action, signal, recommended)
         display_signal: Any = None
+        skip_reason: str | None = None
         if direction in {"both", "long"}:
             long_signal = compute_base_position_vwap_t(daily, minute, **thresholds)
             display_signal = display_signal or long_signal
@@ -217,6 +218,12 @@ class TMonitorEngine:
                 rec = (min(int(sellable * position_ratio), cash_quantity) // 100) * 100
                 if rec >= 100:
                     candidates.append(("long", "buy_t", long_signal, rec))
+                else:
+                    skip_reason = (
+                        f"低吸已达标(分{long_signal.score}),但建议数量不足100股:"
+                        f"可卖底仓 {sellable}×{position_ratio:.0%}={int(sellable * position_ratio)} 股,"
+                        f"可用资金可买 {cash_quantity} 股"
+                    )
         if direction in {"both", "short"}:
             short_signal = compute_base_position_vwap_t_short(daily, minute, **thresholds)
             if display_signal is None or short_signal.score > getattr(display_signal, "score", 0):
@@ -225,14 +232,23 @@ class TMonitorEngine:
                 rec = (int(sellable * position_ratio) // 100) * 100  # 卖底仓,不占用现金
                 if rec >= 100:
                     candidates.append(("short", "sell_open", short_signal, rec))
+                elif not skip_reason:
+                    skip_reason = (
+                        f"高抛已达标(分{short_signal.score}),但可卖底仓不足100股:"
+                        f"底仓 {sellable}×{position_ratio:.0%}={int(sellable * position_ratio)} 股"
+                    )
 
         if not candidates:
             if display_signal is not None:
                 state.score = display_signal.score
                 state.current_price = display_signal.current_price
                 state.vwap = display_signal.vwap
-                state.context = {**display_signal.to_dict(), "position_ratio": position_ratio}
-            return {"position_id": position.id, "status": "observe", "score": getattr(display_signal, "score", 0)}
+                context = {**display_signal.to_dict(), "position_ratio": position_ratio}
+                if skip_reason:
+                    context["skip_reason"] = skip_reason
+                state.context = context
+            status = "skipped" if skip_reason else "observe"
+            return {"position_id": position.id, "status": status, "score": getattr(display_signal, "score", 0), "reason": skip_reason}
 
         # 同分优先正T(买):long 在前,稳定排序按分数降序
         candidates.sort(key=lambda c: (c[2].score, c[0] == "long"), reverse=True)

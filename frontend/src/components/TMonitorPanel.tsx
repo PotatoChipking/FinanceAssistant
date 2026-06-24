@@ -19,7 +19,7 @@ interface TMonitorState {
   support_price: number | null
   stop_loss_price: number | null
   target_price: number | null
-  context?: { reason?: string; data_quality?: string; direction?: string }
+  context?: { reason?: string; data_quality?: string; direction?: string; skip_reason?: string }
 }
 
 const stateLabels: Record<string, string> = {
@@ -133,6 +133,11 @@ export default function TMonitorPanel() {
                 </div>
               </div>
               {row.context?.reason && <div className="text-[11px] text-muted-foreground mt-2 line-clamp-2">{row.context.reason}</div>}
+              {row.context?.skip_reason && (
+                <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400">
+                  ⚠ 已达标但未触发:{row.context.skip_reason}
+                </div>
+              )}
               {row.state === 'buy_t_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'buy')}>确认已低吸</Button>}
               {row.state === 'sell_t_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'sell')}>确认已卖出</Button>}
               {row.state === 'sell_open_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'sell')}>确认已高抛</Button>}
