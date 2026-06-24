@@ -92,6 +92,8 @@ def compute_base_position_vwap_t(
     min_vwap_deviation_pct: float = 0.003,
     min_profit_pct: float = 0.008,
     max_stop_pct: float = 0.015,
+    profit_atr_mult: float = 0.5,
+    stop_atr_mult: float = 0.5,
 ) -> TSignalResult:
     """计算低吸 T 信号；持仓、资金与数量约束由状态机处理。"""
     if len(daily_klines) < 25 or len(minute_klines) < 3:
@@ -134,9 +136,13 @@ def compute_base_position_vwap_t(
     near_support = support_distance <= max(0.004, 0.15 * atr / current)
     below_vwap = vwap_deviation <= -max(min_vwap_deviation_pct, 0.2 * atr / current)
 
+    # 止盈/止损上限按 ATR 自适应:固定值作地板,波动大时自动放大。
+    atr_ratio = atr / current
+    eff_profit = max(min_profit_pct, profit_atr_mult * atr_ratio)
+    eff_stop_cap = max(max_stop_pct, stop_atr_mult * atr_ratio)
     stop = min(support - 0.1 * atr, current - 0.2 * atr)
     stop_risk = max((current - stop) / current, 0.0)
-    target = max(vwap, current * (1.0 + min_profit_pct))
+    target = max(vwap, current * (1.0 + eff_profit))
     reward_risk = (target - current) / max(current - stop, 1e-9)
 
     evidence: list[str] = []
@@ -163,8 +169,8 @@ def compute_base_position_vwap_t(
     hard_blocks: list[str] = []
     if not trend_ok:
         hard_blocks.append("跌破 MA20 或 MA20 明显向下")
-    if stop_risk > max_stop_pct:
-        hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限")
+    if stop_risk > eff_stop_cap:
+        hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限 {eff_stop_cap:.2%}")
     if current <= support - 0.2 * atr:
         hard_blocks.append("已有效跌破关键支撑")
     action = "buy_t" if score >= min_score and not hard_blocks else "observe"
@@ -191,6 +197,8 @@ def compute_base_position_vwap_t(
             "support_distance": round(support_distance, 6),
             "stop_risk": round(stop_risk, 6),
             "reward_risk": round(reward_risk, 4),
+            "eff_profit_pct": round(eff_profit, 6),
+            "eff_stop_cap_pct": round(eff_stop_cap, 6),
             "reversal": reversal,
         },
     )
@@ -219,6 +227,8 @@ def compute_base_position_vwap_t_short(
     min_vwap_deviation_pct: float = 0.003,
     min_profit_pct: float = 0.008,
     max_stop_pct: float = 0.015,
+    profit_atr_mult: float = 0.5,
+    stop_atr_mult: float = 0.5,
 ) -> TSignalResult:
     """计算高抛(倒T先卖)信号;正T 的镜像版本,卖出底仓等回落买回。"""
     if len(daily_klines) < 25 or len(minute_klines) < 3:
@@ -261,9 +271,12 @@ def compute_base_position_vwap_t_short(
     near_resistance = resistance_distance <= max(0.004, 0.15 * atr / current)
     above_vwap = vwap_deviation >= max(min_vwap_deviation_pct, 0.2 * atr / current)
 
+    atr_ratio = atr / current
+    eff_profit = max(min_profit_pct, profit_atr_mult * atr_ratio)
+    eff_stop_cap = max(max_stop_pct, stop_atr_mult * atr_ratio)
     stop = max(resistance + 0.1 * atr, current + 0.2 * atr)
     stop_risk = max((stop - current) / current, 0.0)
-    target = min(vwap, current * (1.0 - min_profit_pct))
+    target = min(vwap, current * (1.0 - eff_profit))
     reward_risk = (current - target) / max(stop - current, 1e-9)
 
     evidence: list[str] = []
@@ -290,8 +303,8 @@ def compute_base_position_vwap_t_short(
     hard_blocks: list[str] = []
     if not trend_ok:
         hard_blocks.append("处于单边强势上涨,不宜高抛")
-    if stop_risk > max_stop_pct:
-        hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限")
+    if stop_risk > eff_stop_cap:
+        hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限 {eff_stop_cap:.2%}")
     if current >= resistance + 0.2 * atr:
         hard_blocks.append("已有效突破关键压力")
     action = "sell_open" if score >= min_score and not hard_blocks else "observe"
@@ -318,6 +331,8 @@ def compute_base_position_vwap_t_short(
             "resistance_distance": round(resistance_distance, 6),
             "stop_risk": round(stop_risk, 6),
             "reward_risk": round(reward_risk, 4),
+            "eff_profit_pct": round(eff_profit, 6),
+            "eff_stop_cap_pct": round(eff_stop_cap, 6),
             "reversal": reversal,
         },
     )

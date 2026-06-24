@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from src.core.kline_service import fetch_klines_sync
 from src.core.notifier import NotifierManager
 from src.core.signals.base_position_vwap_t import (
+    _atr,
     compute_base_position_vwap_t,
     compute_base_position_vwap_t_short,
     evaluate_t_exit,
@@ -161,6 +162,8 @@ class TMonitorEngine:
             min_vwap_deviation_pct=float(params.get("min_vwap_deviation_pct", 0.003)),
             min_profit_pct=float(params.get("min_profit_pct", 0.008)),
             max_stop_pct=float(params.get("max_stop_pct", 0.015)),
+            profit_atr_mult=float(params.get("profit_atr_mult", 0.5)),
+            stop_atr_mult=float(params.get("stop_atr_mult", 0.5)),
         )
         # 离场方式:price=仅固定价触发 / price_or_score=价格或评分任一 / trail=跟踪止盈(尽量多吃)
         exit_mode = str(params.get("exit_mode", "price")).lower()
@@ -184,7 +187,8 @@ class TMonitorEngine:
             # 跟踪止盈:进入盈利区后记录最高价,自高点回落 trail_pct 才卖
             trail_hit = False
             if trail_mode:
-                in_profit = current >= entry * (1 + min_profit)
+                eff_profit = float(sell_sig.metrics.get("eff_profit_pct") or min_profit)
+                in_profit = current >= entry * (1 + eff_profit)
                 peak = float(ctx.get("extreme_price") or current)
                 if in_profit:
                     peak = max(peak, current)
@@ -224,7 +228,8 @@ class TMonitorEngine:
             # 跟踪止盈:进入盈利区后记录最低价,自低点反弹 trail_pct 才买回
             trail_hit = False
             if trail_mode:
-                in_profit = current <= entry * (1 - min_profit)
+                eff_profit = float(buy_sig.metrics.get("eff_profit_pct") or min_profit)
+                in_profit = current <= entry * (1 - eff_profit)
                 trough = float(ctx.get("extreme_price") or current)
                 if in_profit:
                     trough = min(trough, current)
@@ -471,6 +476,8 @@ class TMonitorEngine:
         params = profile.get("params") if isinstance(profile.get("params"), dict) else {}
         min_profit = float(params.get("min_profit_pct", 0.008))
         max_stop = float(params.get("max_stop_pct", 0.015))
+        profit_atr_mult = float(params.get("profit_atr_mult", 0.5))
+        stop_atr_mult = float(params.get("stop_atr_mult", 0.5))
 
         db = SessionLocal()
         try:
@@ -484,14 +491,29 @@ class TMonitorEngine:
 
             if action in {"long_open", "short_open"}:
                 side = "long" if action == "long_open" else "short"
+                # 止盈/止损按 ATR 自适应(地板与 ATR 倍数取大),与自动信号一致
+                eff_profit, eff_stop = min_profit, max_stop
+                try:
+                    stock = db.query(Stock).filter(Stock.id == position.stock_id).first()
+                    if stock:
+                        daily = await asyncio.to_thread(
+                            fetch_klines_sync, stock.symbol, "CN", days=120, interval="1d", cache_ttl_sec=60
+                        )
+                        atr = _atr(daily, 14)
+                        if atr and price > 0:
+                            ratio = atr / price
+                            eff_profit = max(min_profit, profit_atr_mult * ratio)
+                            eff_stop = max(max_stop, stop_atr_mult * ratio)
+                except Exception:
+                    pass
                 if side == "long":
                     state.state = "waiting_exit"
-                    target = round(price * (1 + min_profit), 4)
-                    stop = round(price * (1 - max_stop), 4)
+                    target = round(price * (1 + eff_profit), 4)
+                    stop = round(price * (1 - eff_stop), 4)
                 else:
                     state.state = "waiting_buyback"
-                    target = round(price * (1 - min_profit), 4)
-                    stop = round(price * (1 + max_stop), 4)
+                    target = round(price * (1 - eff_profit), 4)
+                    stop = round(price * (1 + eff_stop), 4)
                 state.entry_price = price
                 state.current_price = price
                 state.target_price = target

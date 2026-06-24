@@ -89,8 +89,10 @@ DEFAULT_STRATEGIES: tuple[StrategySpec, ...] = (
             "trail_pct": 0.003,  # trail 模式:自极值回撤/反弹多少触发离场
             "signal_ttl_minutes": 10,
             "min_vwap_deviation_pct": 0.003,
-            "min_profit_pct": 0.008,
-            "max_stop_pct": 0.015,
+            "min_profit_pct": 0.008,  # 止盈地板;实际取 max(此值, profit_atr_mult×ATR/价)
+            "max_stop_pct": 0.015,  # 止损上限地板;实际取 max(此值, stop_atr_mult×ATR/价)
+            "profit_atr_mult": 0.5,  # 止盈的 ATR 倍数(自适应振幅)
+            "stop_atr_mult": 0.5,  # 止损上限的 ATR 倍数(自适应振幅)
             "direction": "both",  # both=双向 / long=仅正T / short=仅倒T
         },
         default_weight=1.0,

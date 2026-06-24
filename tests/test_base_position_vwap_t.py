@@ -143,6 +143,26 @@ def test_compute_base_position_vwap_t_short_produces_executable_levels():
     assert result.vwap < result.current_price
 
 
+def test_atr_adaptive_widens_targets_on_high_amplitude():
+    """高振幅日K下,止盈/止损上限按 ATR 自动放大,超过固定地板。"""
+    rows = []
+    for index in range(40):
+        close = 10.0
+        rows.append(
+            {
+                "date": f"2026-05-{index + 1:02d}",
+                "open": close,
+                "high": close * 1.04,
+                "low": close * 0.96,
+                "close": close,
+                "volume": 100_000,
+            }
+        )
+    result = compute_base_position_vwap_t(rows, _minute_rows())
+    assert result.metrics["eff_profit_pct"] > 0.008  # 超过 0.8% 地板
+    assert result.metrics["eff_stop_cap_pct"] > 0.015  # 超过 1.5% 地板
+
+
 def test_evaluate_t_exit_short_state():
     params = {"vwap": 10.0, "target_price": 9.9, "stop_loss_price": 10.5}
     assert evaluate_t_exit_short(9.9, **params) == "buy_back"
