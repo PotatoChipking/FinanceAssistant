@@ -20,6 +20,8 @@ from src.web.models import (
     StockScreenerResult,
     StockScreenerRun,
     StrategySignalRun,
+    TMonitorState,
+    TSignalEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,9 @@ DEFAULT_RETENTION: dict[str, int] = {
     "strategy_signal_run_days": 180,
     "market_scan_snapshot_days": 45,
     "board_kline_trading_days": 250,
+    "t_signal_event_days": 180,
+    "t_monitor_state_days": 180,
+    "stock_suggestion_days": 14,
 }
 
 
@@ -223,7 +228,30 @@ def run_housekeeping(db=None, *, now: datetime | None = None) -> dict[str, int]:
             session,
             cfg["board_kline_trading_days"],
         )
+        # 做T:先删事件(子表),再删状态(父表),都按 created_at 过期。
+        stats["t_signal_events"] = _delete_older_than(
+            session,
+            TSignalEvent,
+            TSignalEvent.created_at,
+            current - timedelta(days=cfg["t_signal_event_days"]),
+        )
+        stats["t_monitor_states"] = _delete_older_than(
+            session,
+            TMonitorState,
+            TMonitorState.created_at,
+            current - timedelta(days=cfg["t_monitor_state_days"]),
+        )
         session.commit()
+
+        # 过期建议(独立 session 提交)
+        try:
+            from src.core.suggestion_pool import cleanup_expired_suggestions
+
+            stats["stock_suggestions"] = cleanup_expired_suggestions(days=cfg["stock_suggestion_days"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[housekeeping] 清理过期建议失败: %s", exc)
+            stats["stock_suggestions"] = 0
+
         logger.info("[housekeeping] 清理完成: %s", stats)
         return stats
 

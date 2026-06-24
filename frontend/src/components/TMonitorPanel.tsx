@@ -153,7 +153,7 @@ export default function TMonitorPanel() {
                       {short ? '倒T' : '正T'}
                     </Badge>
                   )}
-                  <Badge variant="secondary">T Score {Math.round(row.score)}</Badge>
+                  {row.state === 'idle' && <Badge variant="secondary">T Score {Math.round(row.score)}</Badge>}
                   <Badge>{stateLabels[row.state] || row.state}</Badge>
                 </div>
               </div>
