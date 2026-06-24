@@ -84,6 +84,15 @@ async def scan(position_id: int | None = None) -> dict:
     return await ENGINE.scan_once(position_id=position_id, bypass_market_hours=True)
 
 
+@router.post("/states/{state_id}/manual")
+async def manual_action(state_id: int, action: str) -> dict:
+    """手动驱动状态机:mark_long_open / mark_short_open / mark_done / reset。"""
+    result = await ENGINE.manual_action(state_id, action)
+    if not result.get("success"):
+        raise HTTPException(400, result.get("error") or "操作失败")
+    return result
+
+
 @router.post("/states/{state_id}/confirm-buy")
 def confirm_buy(state_id: int, db: Session = Depends(get_db)) -> dict:
     state = db.query(TMonitorState).filter(TMonitorState.id == state_id).first()

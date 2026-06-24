@@ -307,5 +307,79 @@ class TMonitorEngine:
         finally:
             db.close()
 
+    async def manual_action(self, state_id: int, action: str) -> dict[str, Any]:
+        """用户手动驱动状态机:标记已低吸/已高抛(开始盯对侧)、完成、重置。"""
+        profile = get_strategy_profile_map().get("base_position_vwap_t") or {}
+        params = profile.get("params") if isinstance(profile.get("params"), dict) else {}
+        db = SessionLocal()
+        try:
+            state = db.query(TMonitorState).filter(TMonitorState.id == state_id).first()
+            if not state:
+                return {"success": False, "error": "做T状态不存在"}
+
+            if action == "reset":
+                state.state = "idle"
+                state.cycle_count = 0
+                state.signal_expires_at = None
+                db.commit()
+                return {"success": True, "state": state.state}
+
+            if action == "mark_done":
+                state.state = "completed"
+                state.cycle_count = (state.cycle_count or 0) + 1
+                state.signal_expires_at = None
+                db.commit()
+                return {"success": True, "state": state.state, "cycle_count": state.cycle_count}
+
+            if action not in {"mark_long_open", "mark_short_open"}:
+                return {"success": False, "error": f"未知操作 {action}"}
+
+            position = db.query(Position).filter(Position.id == state.position_id).first()
+            stock = db.query(Stock).filter(Stock.id == position.stock_id).first() if position else None
+            if not position or not stock:
+                return {"success": False, "error": "持仓不存在"}
+
+            daily, minute = await asyncio.gather(
+                asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=120, interval="1d", cache_ttl_sec=60),
+                asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=320, interval="1min", cache_ttl_sec=30),
+            )
+            if not minute:
+                return {"success": False, "error": "暂无分钟K数据,无法计算参考位"}
+            thresholds = dict(
+                min_score=int(params.get("min_score", 70)),
+                min_vwap_deviation_pct=float(params.get("min_vwap_deviation_pct", 0.003)),
+                min_profit_pct=float(params.get("min_profit_pct", 0.008)),
+                max_stop_pct=float(params.get("max_stop_pct", 0.015)),
+            )
+            current = float(getattr(minute[-1], "close", 0) if not isinstance(minute[-1], dict) else minute[-1].get("close", 0)) or 0.0
+            if action == "mark_long_open":
+                sig = compute_base_position_vwap_t(daily, minute, **thresholds)
+                side, new_state = "long", "waiting_exit"
+                stop = sig.stop_loss_price if sig.stop_loss_price else round(current * 0.985, 4)
+                target = sig.target_price if sig.target_price else round(current * 1.008, 4)
+            else:
+                sig = compute_base_position_vwap_t_short(daily, minute, **thresholds)
+                side, new_state = "short", "waiting_buyback"
+                stop = sig.stop_loss_price if sig.stop_loss_price else round(current * 1.015, 4)
+                target = sig.target_price if sig.target_price else round(current * 0.992, 4)
+
+            entry = sig.current_price or current
+            state.state = new_state
+            state.entry_price = entry
+            state.current_price = entry
+            state.vwap = sig.vwap
+            state.support_price = sig.support_price
+            state.stop_loss_price = stop
+            state.target_price = target
+            state.signal_expires_at = None
+            state.context = {**sig.to_dict(), "direction": side, "manual": True, "stop_loss_price": stop, "target_price": target}
+            db.commit()
+            return {"success": True, "state": state.state}
+        except Exception as exc:
+            db.rollback()
+            return {"success": False, "error": str(exc)}
+        finally:
+            db.close()
+
 
 ENGINE = TMonitorEngine()

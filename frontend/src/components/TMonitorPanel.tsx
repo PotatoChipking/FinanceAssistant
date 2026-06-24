@@ -81,6 +81,22 @@ export default function TMonitorPanel() {
     await load()
   }
 
+  const manual = async (row: TMonitorState, action: 'mark_long_open' | 'mark_short_open' | 'mark_done' | 'reset') => {
+    try {
+      await fetchAPI(`/t-monitor/states/${row.id}/manual?action=${action}`, { method: 'POST' })
+      const labels: Record<string, string> = {
+        mark_long_open: '已标记低吸，开始盯卖点',
+        mark_short_open: '已标记高抛，开始盯买点',
+        mark_done: '已标记完成',
+        reset: '已重置',
+      }
+      toast(labels[action] || '已更新', 'success')
+      await load()
+    } catch (e) {
+      toast(e instanceof Error ? e.message : '操作失败', 'error')
+    }
+  }
+
   return (
     <div className="card p-4 mb-4">
       <div className="flex items-center justify-between gap-3 mb-3">
@@ -138,10 +154,28 @@ export default function TMonitorPanel() {
                   ⚠ 已达标但未触发:{row.context.skip_reason}
                 </div>
               )}
-              {row.state === 'buy_t_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'buy')}>确认已低吸</Button>}
-              {row.state === 'sell_t_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'sell')}>确认已卖出</Button>}
-              {row.state === 'sell_open_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'sell')}>确认已高抛</Button>}
-              {row.state === 'buy_back_notified' && <Button size="sm" className="mt-2" onClick={() => confirm(row, 'buy')}>确认已买回</Button>}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {/* 自动流程的确认按钮 */}
+                {row.state === 'buy_t_notified' && <Button size="sm" onClick={() => confirm(row, 'buy')}>确认已低吸</Button>}
+                {row.state === 'sell_t_notified' && <Button size="sm" onClick={() => confirm(row, 'sell')}>确认已卖出</Button>}
+                {row.state === 'sell_open_notified' && <Button size="sm" onClick={() => confirm(row, 'sell')}>确认已高抛</Button>}
+                {row.state === 'buy_back_notified' && <Button size="sm" onClick={() => confirm(row, 'buy')}>确认已买回</Button>}
+
+                {/* 等待态:手动标记完成 */}
+                {row.state === 'waiting_exit' && <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_done')}>我已卖出完成</Button>}
+                {row.state === 'waiting_buyback' && <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_done')}>我已买回完成</Button>}
+
+                {/* 非活跃态:手动入场(策略没提示时,记录你的实际操作) */}
+                {['idle', 'completed', 'invalidated'].includes(row.state) && (
+                  <>
+                    <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_long_open')}>我已低吸 → 盯卖点</Button>
+                    <Button size="sm" variant="outline" onClick={() => manual(row, 'mark_short_open')}>我已高抛 → 盯买点</Button>
+                  </>
+                )}
+
+                {/* 重置:任何非 idle 态可清回观察 */}
+                {row.state !== 'idle' && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => manual(row, 'reset')}>重置</Button>}
+              </div>
             </div>
             )
           })}
