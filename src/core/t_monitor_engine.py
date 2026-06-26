@@ -179,6 +179,23 @@ class TMonitorEngine:
         trail_pct = max(0.0, float(params.get("trail_pct", 0.003)))
         min_profit = thresholds["min_profit_pct"]
 
+        # 与现价同理:tscore 也只在 idle/离场态写入,其余提前 return 的分支
+        # (次数上限/*_notified/invalidated/completed冷却)会让 score 冻结。
+        # 这里按方向先算一个"当前做T质量分"兜底刷新;idle/离场分支会用各自更
+        # 精确的分数覆盖。score 是离散打分,反映 setup 质量而非价格高低。
+        _direction = str(params.get("direction", "both") or "both").lower()
+        _disp_sig: Any = None
+        if _direction in {"both", "long"}:
+            _disp_sig = compute_base_position_vwap_t(daily, minute, **thresholds)
+        if _direction in {"both", "short"}:
+            _short_sig = compute_base_position_vwap_t_short(daily, minute, **thresholds)
+            if _disp_sig is None or _short_sig.score > _disp_sig.score:
+                _disp_sig = _short_sig
+        if _disp_sig is not None:
+            state.score = _disp_sig.score
+            if _disp_sig.vwap:
+                state.vwap = _disp_sig.vwap
+
         # --- 离场态:实时重算"离场质量分"(平仓本质是反向入场) ---
         if state.state == "waiting_exit":
             # 正T 卖出 = 高抛质量(反向 short 入场分)
