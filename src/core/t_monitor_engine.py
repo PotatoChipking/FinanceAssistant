@@ -104,6 +104,12 @@ class TMonitorEngine:
         reason: str,
     ) -> TSignalEvent:
         signal_id = f"T:{position.id}:{state.trade_date}:{action}:{state.cycle_count}"
+        # 同一信号已记录过则直接复用,避免 signal_id 唯一约束在 flush 处抛 IntegrityError
+        # 把整轮扫描回滚(同样会导致该持仓现价冻结)。同信号也无需重复通知。
+        existing = db.query(TSignalEvent).filter(TSignalEvent.signal_id == signal_id).first()
+        if existing is not None:
+            state.last_signal_id = signal_id
+            return existing
         event = TSignalEvent(
             state_id=state.id,
             position_id=position.id,
@@ -131,7 +137,14 @@ class TMonitorEngine:
         db.flush()
         state.last_signal_id = signal_id
         state.last_signal_at = _now()
-        await self._notify(db, event, stock)
+        # 通知是副作用:发送失败只记录到事件,绝不能让异常冒泡。否则会被
+        # scan_once 的 except 捕获并 db.rollback(),把这只持仓本轮扫描(含现价/
+        # 评分刷新、状态流转)整体回滚——表现为"唯独有信号的那只持仓现价永久冻结"。
+        try:
+            await self._notify(db, event, stock)
+        except Exception as exc:  # noqa: BLE001 - 通知失败不可影响盯盘事务
+            event.notify_success = False
+            event.notify_error = str(exc)[:500]
         return event
 
     async def _scan_position(
