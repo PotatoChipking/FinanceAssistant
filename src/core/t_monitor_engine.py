@@ -14,6 +14,7 @@ from src.core.notifier import NotifierManager
 from src.core.signals.base_position_vwap_t import (
     _atr,
     _exclude_today,
+    cn_price_limit_ratio,
     compute_base_position_vwap_t,
     compute_base_position_vwap_t_short,
     evaluate_t_exit,
@@ -184,6 +185,8 @@ class TMonitorEngine:
             max_stop_pct=float(params.get("max_stop_pct", 0.015)),
             profit_atr_mult=float(params.get("profit_atr_mult", 0.5)),
             stop_atr_mult=float(params.get("stop_atr_mult", 0.5)),
+            # 涨跌停闸门:按板块算涨跌停比例,信号据此结合位置/量价拦截高抛/低吸
+            limit_ratio=cn_price_limit_ratio(stock.symbol, getattr(stock, "name", "") or ""),
         )
         # 离场方式:price=仅固定价触发 / price_or_score=价格或评分任一 / trail=跟踪止盈(尽量多吃)
         exit_mode = str(params.get("exit_mode", "price")).lower()

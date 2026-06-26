@@ -53,6 +53,66 @@ def _exclude_today(daily_rows: list[Any], today: str) -> list[Any]:
     return daily_rows
 
 
+def cn_price_limit_ratio(symbol: str, name: str = "") -> float:
+    """A股涨跌停比例:创业板/科创板 20%,北交所 30%,ST 5%,其余主板 10%。"""
+    s = (symbol or "").strip()
+    if s.startswith(("300", "301", "688", "689")):
+        return 0.20
+    if s.startswith(("920", "8", "4")):
+        return 0.30
+    return 0.05 if "ST" in (name or "").upper() else 0.10
+
+
+def _limit_position_block(
+    *,
+    direction: str,
+    current: float,
+    prev_close: float,
+    ma20: float,
+    closes: list[float],
+    daily: list[Any],
+    minute: list[Any],
+    limit_ratio: float,
+) -> str | None:
+    """涨跌停 + 位置 + 量价闸门,返回拦截原因或 None。
+
+    - 涨停时禁低吸(买不进);高抛仅在"高位+放量"(出货风险)才放行,否则强势持有不卖。
+    - 跌停时禁高抛(卖不出);低吸仅在"低位+放量"(恐慌见底)才放行,否则不接刀。
+    direction: 'long' 低吸(正T先买) / 'short' 高抛(倒T先卖)。
+    """
+    if not limit_ratio or prev_close <= 0:
+        return None
+    up_limit = round(prev_close * (1 + limit_ratio), 2)
+    down_limit = round(prev_close * (1 - limit_ratio), 2)
+    at_up = current >= up_limit - 0.01
+    at_down = current <= down_limit + 0.01
+    if not (at_up or at_down):
+        return None
+    dev_ma20 = (current / ma20 - 1.0) if ma20 else 0.0
+    gain_10d = (current / closes[-10] - 1.0) if len(closes) >= 10 and closes[-10] else 0.0
+    low_pos = dev_ma20 <= 0.08 and gain_10d <= 0.15
+    high_pos = dev_ma20 >= 0.15 or gain_10d >= 0.30
+    vols = [v for v in (_float(_value(x, "volume")) for x in daily) if v]
+    avg5 = sum(vols[-5:]) / min(len(vols), 5) if vols else 0.0
+    today_vol = sum((_float(_value(x, "volume")) or 0.0) for x in minute)
+    vol_ratio = today_vol / avg5 if avg5 else 0.0
+    heavy_vol = vol_ratio >= 1.8
+    if direction == "short":  # 高抛/倒T:先卖
+        if at_down:
+            return "已跌停,无法卖出"
+        if at_up and not (high_pos and heavy_vol):
+            return (
+                f"已涨停且非高位放量(乖离MA20 {dev_ma20:.1%}/量比 {vol_ratio:.2f}),"
+                "强势持有不宜高抛"
+            )
+    else:  # 低吸/正T:先买
+        if at_up:
+            return "已涨停,无法买入低吸"
+        if at_down and not (low_pos and heavy_vol):
+            return "已跌停且非低位放量,不宜接刀低吸"
+    return None
+
+
 def compute_intraday_vwap(rows: list[Any]) -> tuple[float | None, str]:
     """优先使用成交额，字段缺失或单位异常时回退到典型价成交量加权。"""
     total_volume = 0.0
@@ -116,6 +176,7 @@ def compute_base_position_vwap_t(
     max_stop_pct: float = 0.015,
     profit_atr_mult: float = 0.5,
     stop_atr_mult: float = 0.5,
+    limit_ratio: float | None = None,
 ) -> TSignalResult:
     """计算低吸 T 信号；持仓、资金与数量约束由状态机处理。"""
     if len(daily_klines) < 25 or len(minute_klines) < 3:
@@ -200,6 +261,12 @@ def compute_base_position_vwap_t(
         hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限 {eff_stop_cap:.2%}")
     if current <= support - 0.2 * atr:
         hard_blocks.append("已有效跌破关键支撑")
+    limit_block = _limit_position_block(
+        direction="long", current=current, prev_close=valid_closes[-1], ma20=ma20,
+        closes=valid_closes, daily=daily, minute=minute, limit_ratio=limit_ratio or 0.0,
+    )
+    if limit_block:
+        hard_blocks.append(limit_block)
     action = "buy_t" if score >= min_score and not hard_blocks else "observe"
     reason = "；".join(evidence) if action == "buy_t" else "；".join(hard_blocks or evidence or ["条件未满足"])
     return TSignalResult(
@@ -261,6 +328,7 @@ def compute_base_position_vwap_t_short(
     max_stop_pct: float = 0.015,
     profit_atr_mult: float = 0.5,
     stop_atr_mult: float = 0.5,
+    limit_ratio: float | None = None,
 ) -> TSignalResult:
     """计算高抛(倒T先卖)信号;正T 的镜像版本,卖出底仓等回落买回。"""
     if len(daily_klines) < 25 or len(minute_klines) < 3:
@@ -344,6 +412,12 @@ def compute_base_position_vwap_t_short(
         hard_blocks.append(f"止损距离 {stop_risk:.2%} 超过上限 {eff_stop_cap:.2%}")
     if current >= resistance + 0.2 * atr:
         hard_blocks.append("已有效突破关键压力")
+    limit_block = _limit_position_block(
+        direction="short", current=current, prev_close=valid_closes[-1], ma20=ma20,
+        closes=valid_closes, daily=daily, minute=minute, limit_ratio=limit_ratio or 0.0,
+    )
+    if limit_block:
+        hard_blocks.append(limit_block)
     action = "sell_open" if score >= min_score and not hard_blocks else "observe"
     reason = "；".join(evidence) if action == "sell_open" else "；".join(hard_blocks or evidence or ["条件未满足"])
     return TSignalResult(
