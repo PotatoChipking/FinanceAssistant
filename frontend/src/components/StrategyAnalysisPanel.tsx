@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Download,
+  History,
   Loader2,
   MessageSquare,
   Plus,
@@ -95,6 +96,7 @@ export default function StrategyAnalysisPanel() {
   const [strategies, setStrategies] = useState<StrategyPromptItem[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [pool, setPool] = useState<StrategyPoolItem[]>([])
+  const [lastConvs, setLastConvs] = useState<Record<string, { conversation_id: number; updated_at: string; title: string }>>({})
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -140,6 +142,19 @@ export default function StrategyAnalysisPanel() {
     })
   }, [])
 
+  const loadLastConvs = useCallback(async (strategyId: number | null) => {
+    if (!strategyId) {
+      setLastConvs({})
+      return
+    }
+    try {
+      const res = await strategyAnalysisApi.lastConversations(strategyId)
+      setLastConvs(res.items || {})
+    } catch {
+      setLastConvs({})
+    }
+  }, [])
+
   const refreshPool = useCallback(async () => {
     try {
       const poolRes = await strategyAnalysisApi.listPool()
@@ -153,14 +168,20 @@ export default function StrategyAnalysisPanel() {
     loadAll().catch((e) => setMessage(e?.message || '加载策略分析失败'))
   }, [loadAll])
 
-  // 策略对话产出标签后，ChatWidget 会广播事件，这里刷新池以更新徽章
+  // 切换策略时，加载该策略下各票的最近一次对话（用于「查看上次」）
+  useEffect(() => {
+    loadLastConvs(selectedId)
+  }, [selectedId, loadLastConvs])
+
+  // 策略对话产出后 ChatWidget 广播事件，这里刷新徽章 + 最近对话
   useEffect(() => {
     const onAnalyzed = () => {
       refreshPool()
+      loadLastConvs(selectedId)
     }
     window.addEventListener('panwatch-strategy-analyzed', onAnalyzed)
     return () => window.removeEventListener('panwatch-strategy-analyzed', onAnalyzed)
-  }, [refreshPool])
+  }, [refreshPool, loadLastConvs, selectedId])
 
   const dirty = useMemo(() => {
     if (!selected) return name.trim() !== '' || prompt.trim() !== ''
@@ -322,6 +343,21 @@ export default function StrategyAnalysisPanel() {
           stockName: item.name || item.symbol,
           strategyId: selected.id,
           openingMessage: opening,
+        },
+      }),
+    )
+  }
+
+  // 打开上一次的策略对话（查看历史结论，不重新分析）
+  const openLastConversation = (item: StrategyPoolItem, conversationId: number) => {
+    window.dispatchEvent(
+      new CustomEvent('panwatch-open-chat', {
+        detail: {
+          symbol: item.symbol,
+          market: item.market,
+          stockName: item.name || item.symbol,
+          strategyId: selected?.id,
+          conversationId,
         },
       }),
     )
@@ -511,14 +547,26 @@ export default function StrategyAnalysisPanel() {
                     </span>
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">
+                    {lastConvs[`${p.market}:${p.symbol}`] && (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="h-7 px-2 text-[11px]"
+                        onClick={() => openLastConversation(p, lastConvs[`${p.market}:${p.symbol}`].conversation_id)}
+                        title={`查看上次分析（${lastConvs[`${p.market}:${p.symbol}`].updated_at}）`}
+                      >
+                        <History className="h-3.5 w-3.5" /> 上次
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       className="h-7 px-2 text-[11px]"
                       onClick={() => openStrategyChat(p)}
                       disabled={!selectedId}
-                      title={selectedId ? '用所选策略开对话分析' : '请先选择策略'}
+                      title={selectedId ? '用所选策略开新的分析对话' : '请先选择策略'}
                     >
-                      <MessageSquare className="h-3.5 w-3.5" /> 分析
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      {lastConvs[`${p.market}:${p.symbol}`] ? '重测' : '分析'}
                     </Button>
                     <button
                       className="text-muted-foreground hover:text-destructive"

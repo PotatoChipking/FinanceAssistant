@@ -102,4 +102,8 @@ export const strategyAnalysisApi = {
     fetchAPI<{ items: StrategyAnalysisResultItem[] }>(
       `/strategy-analysis/results${strategyId ? `?strategy_id=${strategyId}` : ''}`,
     ),
+  lastConversations: (strategyId: number) =>
+    fetchAPI<{ items: Record<string, { conversation_id: number; updated_at: string; title: string }> }>(
+      `/strategy-analysis/last-conversations?strategy_id=${strategyId}`,
+    ),
 }

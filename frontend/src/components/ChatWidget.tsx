@@ -10,6 +10,7 @@ interface StockContext {
   pageContext?: string
   strategyId?: number
   openingMessage?: string
+  conversationId?: number
 }
 
 export default function ChatWidget() {
@@ -59,6 +60,15 @@ export default function ChatWidget() {
       setOpen(true)
       setStockContext(detail)
       setSuggestedQuestions([])
+
+      // 查看历史：带 conversationId 时直接打开已有会话，不新建、不重发
+      if (detail.conversationId) {
+        setActiveConvId(detail.conversationId)
+        setView('chat')
+        setMessages([])
+        loadMessages(detail.conversationId)
+        return
+      }
 
       // Create a new conversation bound to this stock, with page context
       chatApi.createConversation({
@@ -118,7 +128,7 @@ export default function ChatWidget() {
     }
     window.addEventListener('panwatch-open-chat', handler)
     return () => window.removeEventListener('panwatch-open-chat', handler)
-  }, [loadSuggestedQuestions])
+  }, [loadSuggestedQuestions, loadMessages])
 
   useEffect(() => {
     if (open) {

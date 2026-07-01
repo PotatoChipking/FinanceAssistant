@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from src.web.api.chat import _get_ai_client
 from src.web.database import get_db
 from src.web.models import (
+    ChatConversation,
     Position,
     Stock,
     StrategyAnalysisPoolItem,
@@ -420,3 +421,30 @@ def list_results(strategy_id: int | None = None, limit: int = 100, db: Session =
         if key not in latest:
             latest[key] = _result_row(r)
     return {"items": list(latest.values())}
+
+
+@router.get("/last-conversations")
+def last_conversations(strategy_id: int, db: Session = Depends(get_db)):
+    """返回该策略下每只股票最近一次策略对话（用于「查看上次分析」）。
+
+    key 形如 "CN:600118" → {conversation_id, updated_at, title}
+    """
+    rows = (
+        db.query(ChatConversation)
+        .filter(
+            ChatConversation.strategy_id == strategy_id,
+            ChatConversation.stock_symbol.isnot(None),
+        )
+        .order_by(ChatConversation.updated_at.desc(), ChatConversation.id.desc())
+        .all()
+    )
+    latest: dict[str, dict] = {}
+    for c in rows:
+        key = f"{(c.stock_market or 'CN').upper()}:{c.stock_symbol}"
+        if key not in latest:
+            latest[key] = {
+                "conversation_id": c.id,
+                "updated_at": _iso(c.updated_at),
+                "title": c.title or "",
+            }
+    return {"items": latest}
