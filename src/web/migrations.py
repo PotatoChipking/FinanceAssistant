@@ -2034,6 +2034,24 @@ def _m124_strategy_analysis_tables(conn: Connection) -> None:
     )
 
 
+def _m125_strategy_pool_tags(conn: Connection) -> None:
+    """策略池票上叠加AI分析标签: strategy_analysis_pool 补 tags / tags_updated_at。"""
+    if not _has_table(conn, "strategy_analysis_pool"):
+        return  # 表由 create_all 建, 尚不存在时跳过(下次启动 create_all 会带上新列)
+    _add_column_if_missing(
+        conn,
+        "strategy_analysis_pool",
+        "tags",
+        "ALTER TABLE strategy_analysis_pool ADD COLUMN tags JSON",
+    )
+    _add_column_if_missing(
+        conn,
+        "strategy_analysis_pool",
+        "tags_updated_at",
+        "ALTER TABLE strategy_analysis_pool ADD COLUMN tags_updated_at DATETIME",
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "legacy_schema_and_columns", _m001_legacy_schema_columns, imperative=True),
     Migration(2, "legacy_old_providers", _m002_legacy_old_providers, imperative=True),
@@ -2064,6 +2082,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(122, "backtest_tables", _m122_backtest_tables),
     Migration(123, "base_position_vwap_t", _m123_base_position_vwap_t),
     Migration(124, "strategy_analysis_chat_binding", _m124_strategy_analysis_tables),
+    Migration(125, "strategy_pool_tags", _m125_strategy_pool_tags),
 )
 
 

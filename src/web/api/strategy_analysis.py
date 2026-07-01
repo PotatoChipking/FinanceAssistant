@@ -66,6 +66,8 @@ def _pool_row(row: StrategyAnalysisPoolItem) -> dict:
         "name": row.name or row.symbol,
         "source": row.source or "manual",
         "note": row.note or "",
+        "tags": row.tags or {},
+        "tags_updated_at": _iso(row.tags_updated_at),
         "created_at": _iso(row.created_at),
     }
 

@@ -4,6 +4,7 @@ import {
   Loader2,
   MessageSquare,
   Plus,
+  RefreshCw,
   Save,
   Search,
   Sparkles,
@@ -15,11 +16,74 @@ import {
   type StockSearchResult,
   type StrategyPoolItem,
   type StrategyPromptItem,
+  type StrategyTags,
 } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Input } from '@panwatch/base-ui/components/ui/input'
+import { BadgeChip } from '@panwatch/biz-ui/components/badge-chip'
+import { AiSuggestionBadge } from '@panwatch/biz-ui/components/ai-suggestion-badge'
 
 const MARKET_LABEL: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股' }
+
+const BREAKOUT_META: Record<string, { label: string; cls: string }> = {
+  valid: { label: '有效突破', cls: 'bg-rose-500/15 text-rose-500' },
+  pending: { label: '突破待确认', cls: 'bg-amber-500/15 text-amber-500' },
+  failed: { label: '突破失败', cls: 'bg-emerald-500/15 text-emerald-500' },
+  expired: { label: '突破已过期', cls: 'bg-accent/50 text-muted-foreground' },
+  none: { label: '不符合', cls: 'bg-accent/50 text-muted-foreground' },
+}
+
+const VOLUME_META: Record<string, { label: string; cls: string }> = {
+  strong: { label: '放量确认', cls: 'bg-rose-500/15 text-rose-500' },
+  weak: { label: '量能不足', cls: 'bg-accent/50 text-muted-foreground' },
+}
+
+const num = (v: unknown, d = 2) => (typeof v === 'number' && !Number.isNaN(v) ? v.toFixed(d) : null)
+
+function StrategyBadges({ tags }: { tags?: StrategyTags }) {
+  if (!tags || Object.keys(tags).length === 0) return null
+  const gap = typeof tags.gap_to_prev_high_pct === 'number' ? tags.gap_to_prev_high_pct : null
+  const breakout = tags.breakout && BREAKOUT_META[tags.breakout]
+  const volume = tags.volume_confirm && VOLUME_META[tags.volume_confirm]
+  const prevHigh = num(tags.prev_high)
+  const support = num(tags.support)
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      {breakout && <BadgeChip size="xs" label={breakout.label} className={breakout.cls} />}
+      {prevHigh && (
+        <BadgeChip size="xs" label={`前高 ${prevHigh}`} className="bg-accent/50 text-muted-foreground" />
+      )}
+      {gap != null && (
+        <BadgeChip
+          size="xs"
+          label={`距前高 ${gap >= 0 ? '+' : ''}${gap.toFixed(1)}%`}
+          className={gap >= 0 ? 'bg-rose-500/15 text-rose-500' : 'bg-emerald-500/15 text-emerald-500'}
+        />
+      )}
+      {tags.pullback_support && (
+        <BadgeChip
+          size="xs"
+          label="回踩支撑"
+          title={support ? `支撑位 ${support}` : undefined}
+          className="bg-sky-500/15 text-sky-500"
+        />
+      )}
+      {!tags.pullback_support && support && (
+        <BadgeChip size="xs" label={`支撑 ${support}`} className="bg-accent/50 text-muted-foreground" />
+      )}
+      {volume && <BadgeChip size="xs" label={volume.label} className={volume.cls} />}
+      {tags.action && (
+        <AiSuggestionBadge
+          size="xs"
+          isAI
+          action={tags.action}
+          actionLabel={tags.action_label}
+          title={tags.reason || undefined}
+        />
+      )}
+    </div>
+  )
+}
 const MARKET_TABS = [
   { value: '', label: '全部' },
   { value: 'CN', label: 'A股' },
@@ -76,9 +140,27 @@ export default function StrategyAnalysisPanel() {
     })
   }, [])
 
+  const refreshPool = useCallback(async () => {
+    try {
+      const poolRes = await strategyAnalysisApi.listPool()
+      setPool(poolRes.items || [])
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
   useEffect(() => {
     loadAll().catch((e) => setMessage(e?.message || '加载策略分析失败'))
   }, [loadAll])
+
+  // 策略对话产出标签后，ChatWidget 会广播事件，这里刷新池以更新徽章
+  useEffect(() => {
+    const onAnalyzed = () => {
+      refreshPool()
+    }
+    window.addEventListener('panwatch-strategy-analyzed', onAnalyzed)
+    return () => window.removeEventListener('panwatch-strategy-analyzed', onAnalyzed)
+  }, [refreshPool])
 
   const dirty = useMemo(() => {
     if (!selected) return name.trim() !== '' || prompt.trim() !== ''
@@ -337,16 +419,27 @@ export default function StrategyAnalysisPanel() {
         <div className="rounded-lg border border-border/60 p-3">
           <div className="mb-2 flex items-center justify-between">
             <div className="text-[13px] font-semibold">策略池（{pool.length}）</div>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="h-7 px-2 text-[11px]"
-              onClick={importPositions}
-              disabled={importing}
-            >
-              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-              导入持仓
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={refreshPool}
+                title="刷新徽章"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-7 px-2 text-[11px]"
+                onClick={importPositions}
+                disabled={importing}
+              >
+                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                导入持仓
+              </Button>
+            </div>
           </div>
 
           {/* 搜索添加 */}
@@ -406,34 +499,37 @@ export default function StrategyAnalysisPanel() {
             {pool.map((p) => (
               <div
                 key={p.id}
-                className="flex items-center justify-between rounded-lg border border-border/50 bg-background/40 px-2.5 py-2 text-[12px]"
+                className="rounded-lg border border-border/50 bg-background/40 px-2.5 py-2 text-[12px]"
               >
-                <div className="min-w-0">
-                  <span className="font-medium text-foreground">{p.name || p.symbol}</span>
-                  <span className="ml-1 font-mono text-[11px] text-muted-foreground">{p.symbol}</span>
-                  <span className="ml-1 text-[10px] text-muted-foreground">
-                    {MARKET_LABEL[p.market] || p.market}
-                    {p.source === 'position' ? ' ·持仓' : ''}
-                  </span>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="font-medium text-foreground">{p.name || p.symbol}</span>
+                    <span className="ml-1 font-mono text-[11px] text-muted-foreground">{p.symbol}</span>
+                    <span className="ml-1 text-[10px] text-muted-foreground">
+                      {MARKET_LABEL[p.market] || p.market}
+                      {p.source === 'position' ? ' ·持仓' : ''}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      onClick={() => openStrategyChat(p)}
+                      disabled={!selectedId}
+                      title={selectedId ? '用所选策略开对话分析' : '请先选择策略'}
+                    >
+                      <MessageSquare className="h-3.5 w-3.5" /> 分析
+                    </Button>
+                    <button
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() => removePoolItem(p.id)}
+                      title="移除"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <Button
-                    size="sm"
-                    className="h-7 px-2 text-[11px]"
-                    onClick={() => openStrategyChat(p)}
-                    disabled={!selectedId}
-                    title={selectedId ? '用所选策略开对话分析' : '请先选择策略'}
-                  >
-                    <MessageSquare className="h-3.5 w-3.5" /> 分析
-                  </Button>
-                  <button
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => removePoolItem(p.id)}
-                    title="移除"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
+                <StrategyBadges tags={p.tags} />
               </div>
             ))}
             {pool.length === 0 && (

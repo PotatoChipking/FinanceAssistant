@@ -89,6 +89,14 @@ export default function ChatWidget() {
             setConversations((prev) =>
               prev.map((c) => (c.id === conv.id ? { ...c, title: c.title || detail.openingMessage!.slice(0, 20) } : c)),
             )
+            // 策略对话：回复已落标签，通知策略面板刷新徽章
+            if (detail.strategyId) {
+              window.dispatchEvent(
+                new CustomEvent('panwatch-strategy-analyzed', {
+                  detail: { symbol: detail.symbol, market: detail.market },
+                }),
+              )
+            }
           } catch (e) {
             setMessages([
               tempUserMsg,

@@ -501,6 +501,8 @@ class StrategyAnalysisPoolItem(Base):
     name = Column(String, default="")
     source = Column(String, default="manual")  # manual / position
     note = Column(String, default="")
+    tags = Column(JSON, default={})  # 策略AI分析结果标签(突破有效性/前高/支撑/建议等)
+    tags_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 

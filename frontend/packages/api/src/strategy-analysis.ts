@@ -11,6 +11,18 @@ export interface StrategyPromptItem {
   updated_at: string
 }
 
+export interface StrategyTags {
+  prev_high?: number | null
+  breakout?: 'valid' | 'pending' | 'failed' | 'expired' | 'none' | string
+  gap_to_prev_high_pct?: number | null
+  support?: number | null
+  pullback_support?: boolean
+  volume_confirm?: 'strong' | 'weak' | 'neutral' | 'none' | string
+  action?: string
+  action_label?: string
+  reason?: string
+}
+
 export interface StrategyPoolItem {
   id: number
   symbol: string
@@ -18,6 +30,8 @@ export interface StrategyPoolItem {
   name: string
   source: string
   note: string
+  tags?: StrategyTags
+  tags_updated_at?: string
   created_at: string
 }
 

@@ -23,8 +23,10 @@ from src.web.models import (
     Position,
     Stock,
     StockSuggestion,
+    StrategyAnalysisPoolItem,
     StrategyPrompt,
 )
+from src.core.signals.structured_output import strip_tagged_json, try_extract_tagged_json
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -43,6 +45,31 @@ SYSTEM_PROMPT = """你是 PanWatch 的 AI 投资助手。
 
 MAX_HISTORY_MESSAGES = 20
 MAX_TOOL_ROUNDS = 5
+
+# 策略对话结束时附带的结构化标签，用于把关键信息标在股票上（用户不可见的 HTML 注释）
+STRATEGY_TAG_INSTRUCTION = """在你正常的中文分析之后，务必在回复最末尾追加一段结构化标签（HTML 注释，用户看不到），格式严格如下：
+<!--PANWATCH_JSON-->
+{"prev_high": 数字或null, "breakout": "valid|pending|failed|expired|none", "gap_to_prev_high_pct": 数字或null, "support": 数字或null, "pullback_support": true或false, "volume_confirm": "strong|weak|neutral|none", "action": "buy|add|reduce|sell|hold|watch|avoid", "action_label": "建仓|加仓|减仓|清仓|持有|观望|回避", "reason": "一句话理由"}
+<!--/PANWATCH_JSON-->
+字段含义：prev_high=突破锚点前高价；breakout=突破有效性(valid有效/pending待确认/failed失败/expired已过期/none不符合)；gap_to_prev_high_pct=现价相对前高的百分比(高于为正)；support=关键支撑位；pullback_support=是否已回踩到支撑附近；volume_confirm=量价确认强度；action/action_label=对该持仓的操作建议。数值用数字，不确定用 null，不要编造。"""
+
+
+def _apply_strategy_tags(db: Session, symbol: str, market: str, tags: dict) -> None:
+    """把策略分析抽取到的标签写回策略池对应股票。"""
+    if not tags:
+        return
+    item = (
+        db.query(StrategyAnalysisPoolItem)
+        .filter(
+            StrategyAnalysisPoolItem.symbol == symbol,
+            StrategyAnalysisPoolItem.market == (market or "CN").upper(),
+        )
+        .first()
+    )
+    if not item:
+        return  # 不在策略池里（如从别处开的对话）则不落标签
+    item.tags = tags
+    item.tags_updated_at = datetime.now()
 
 # ──────────────── Tool Definitions ────────────────
 
@@ -500,7 +527,8 @@ async def send_message(
             system_content = (
                 strategy.prompt
                 + "\n\n---\n你现在是上述策略的分析助手。请严格依据该策略，"
-                "结合下方提供的行情数据回答用户问题；数据不足时可调用工具补充。"
+                "结合下方提供的行情数据回答用户问题；数据不足时可调用工具补充。\n\n"
+                + STRATEGY_TAG_INSTRUCTION
             )
         else:
             system_content = SYSTEM_PROMPT
@@ -612,6 +640,16 @@ async def send_message(
         except Exception as e:
             logger.error(f"AI 对话失败: {e}")
             ai_response = f"抱歉，AI 服务暂时不可用：{e}"
+
+        # 策略对话：抽取结构化标签叠加到策略池股票，并从正文剥离标签块
+        if strategy and conv.stock_symbol and conv.stock_market:
+            try:
+                tags = try_extract_tagged_json(ai_response)
+                if tags:
+                    _apply_strategy_tags(db, conv.stock_symbol, conv.stock_market, tags)
+                    ai_response = strip_tagged_json(ai_response)
+            except Exception as e:
+                logger.warning(f"策略标签抽取失败: {e}")
 
         # 保存 AI 回复
         assistant_msg = ChatMessage(
