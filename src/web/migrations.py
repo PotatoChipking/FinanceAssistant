@@ -2020,6 +2020,20 @@ CREATE TABLE IF NOT EXISTS t_signal_events (
     )
 
 
+def _m124_strategy_analysis_tables(conn: Connection) -> None:
+    """策略AI分析: 对话绑定策略提示词(chat_conversations.strategy_id)。
+
+    strategy_prompts / strategy_analysis_pool / strategy_analysis_results 三张新表
+    由 Base.metadata.create_all 建, 此处只补已存在表 chat_conversations 的新列。
+    """
+    _add_column_if_missing(
+        conn,
+        "chat_conversations",
+        "strategy_id",
+        "ALTER TABLE chat_conversations ADD COLUMN strategy_id INTEGER",
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "legacy_schema_and_columns", _m001_legacy_schema_columns, imperative=True),
     Migration(2, "legacy_old_providers", _m002_legacy_old_providers, imperative=True),
@@ -2049,6 +2063,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(121, "strategy_pool_fields", _m121_strategy_pool_fields),
     Migration(122, "backtest_tables", _m122_backtest_tables),
     Migration(123, "base_position_vwap_t", _m123_base_position_vwap_t),
+    Migration(124, "strategy_analysis_chat_binding", _m124_strategy_analysis_tables),
 )
 
 

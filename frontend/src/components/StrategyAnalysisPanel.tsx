@@ -1,23 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Bot,
-  ChevronDown,
   Download,
   Loader2,
+  MessageSquare,
   Plus,
-  RefreshCw,
   Save,
   Search,
   Sparkles,
   Trash2,
 } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import {
   stocksApi,
   strategyAnalysisApi,
   type StockSearchResult,
-  type StrategyAnalysisResultItem,
   type StrategyPoolItem,
   type StrategyPromptItem,
 } from '@panwatch/api'
@@ -36,7 +31,6 @@ export default function StrategyAnalysisPanel() {
   const [strategies, setStrategies] = useState<StrategyPromptItem[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [pool, setPool] = useState<StrategyPoolItem[]>([])
-  const [results, setResults] = useState<Record<string, StrategyAnalysisResultItem>>({})
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -54,13 +48,9 @@ export default function StrategyAnalysisPanel() {
   const [saving, setSaving] = useState(false)
   const [importing, setImporting] = useState(false)
   const [adding, setAdding] = useState(false)
-  const [analyzingAll, setAnalyzingAll] = useState(false)
-  const [analyzingSymbol, setAnalyzingSymbol] = useState<string>('')
   const [message, setMessage] = useState('')
-  const [expanded, setExpanded] = useState<string | null>(null)
 
   const selected = strategies.find((s) => s.id === selectedId) || null
-  const keyOf = (market: string, symbol: string) => `${market}:${symbol}`
 
   const applyStrategy = (row: StrategyPromptItem) => {
     setSelectedId(row.id)
@@ -71,17 +61,13 @@ export default function StrategyAnalysisPanel() {
   }
 
   const loadAll = useCallback(async () => {
-    const [stratRes, poolRes, resultRes] = await Promise.all([
+    const [stratRes, poolRes] = await Promise.all([
       strategyAnalysisApi.listStrategies().catch(() => ({ items: [] })),
       strategyAnalysisApi.listPool().catch(() => ({ items: [] })),
-      strategyAnalysisApi.listResults().catch(() => ({ items: [] })),
     ])
     const items = stratRes.items || []
     setStrategies(items)
     setPool(poolRes.items || [])
-    const map: Record<string, StrategyAnalysisResultItem> = {}
-    for (const r of resultRes.items || []) map[keyOf(r.market, r.symbol)] = r
-    setResults(map)
     setSelectedId((prev) => {
       if (prev && items.some((x) => x.id === prev)) return prev
       const first = items[0]
@@ -165,6 +151,7 @@ export default function StrategyAnalysisPanel() {
     }
   }
 
+  // ---- 股票搜索下拉（复用持仓同款 /stocks/search）----
   const doSearch = async (q: string, market: string) => {
     if (q.trim().length < 1) {
       setSearchResults([])
@@ -235,65 +222,39 @@ export default function StrategyAnalysisPanel() {
     }
   }
 
-  const analyzeOne = async (item: StrategyPoolItem) => {
-    if (!selectedId) {
-      setMessage('请先选择一个策略')
-      return null
-    }
-    setAnalyzingSymbol(keyOf(item.market, item.symbol))
-    try {
-      const res = await strategyAnalysisApi.analyze({
-        strategy_id: selectedId,
-        symbol: item.symbol,
-        market: item.market,
-        name: item.name,
-      })
-      setResults((prev) => ({ ...prev, [keyOf(item.market, item.symbol)]: res }))
-      return res
-    } catch (e: any) {
-      setMessage(`${item.name || item.symbol} 分析失败：${e?.message || ''}`)
-      return null
-    } finally {
-      setAnalyzingSymbol('')
-    }
-  }
-
-  const analyzeAll = async () => {
-    if (!selectedId) {
+  // ---- 一键分析 = 打开策略对话（复用右下角 ChatWidget），首轮分析作为开场 ----
+  const openStrategyChat = (item: StrategyPoolItem) => {
+    if (!selected) {
       setMessage('请先选择一个策略')
       return
     }
-    if (!pool.length) {
-      setMessage('策略池为空，请先加入股票')
-      return
-    }
-    setAnalyzingAll(true)
-    setMessage('开始逐票分析…')
-    let ok = 0
-    for (const item of pool) {
-      const res = await analyzeOne(item)
-      if (res) ok += 1
-    }
-    setAnalyzingAll(false)
-    setMessage(`分析完成：成功 ${ok}/${pool.length}`)
+    const opening =
+      `请依据「${selected.name}」策略，结合下方提供的当天与最近行情数据，` +
+      `判断 ${item.name || item.symbol}（${item.market}:${item.symbol}）当前状态，` +
+      `先用一句话给出明确结论（如：有效突破/突破待确认/突破失败/不符合/观望），再分点说明依据（量价、点位、时间）。`
+    window.dispatchEvent(
+      new CustomEvent('panwatch-open-chat', {
+        detail: {
+          symbol: item.symbol,
+          market: item.market,
+          stockName: item.name || item.symbol,
+          strategyId: selected.id,
+          openingMessage: opening,
+        },
+      }),
+    )
   }
 
   return (
     <section className="card p-4">
-      <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-[15px] font-semibold">
-            <Sparkles className="h-4 w-4 text-primary" />
-            策略 AI 分析
-          </div>
-          <p className="mt-1 text-[12px] text-muted-foreground">
-            把持仓或手动加入的股票放进策略池，让 AI 学习所选策略，并结合当天与最近行情逐票分析。
-          </p>
+      <div className="mb-4">
+        <div className="flex items-center gap-2 text-[15px] font-semibold">
+          <Sparkles className="h-4 w-4 text-primary" />
+          策略 AI 分析（对话式）
         </div>
-        <Button onClick={analyzeAll} disabled={analyzingAll || !pool.length || !selectedId}>
-          {analyzingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
-          开始分析
-        </Button>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          把持仓或手动加入的股票放进策略池，让 AI 以所选策略为准，结合当天与最近行情逐票分析；点「分析」直接开对话，可继续追问。
+        </p>
       </div>
 
       {message && (
@@ -303,251 +264,181 @@ export default function StrategyAnalysisPanel() {
       )}
 
       <div className="grid gap-4 xl:grid-cols-[380px_minmax(0,1fr)]">
-        {/* 左：策略 + 池子 */}
-        <div className="space-y-4">
-          <div className="rounded-lg border border-border/60 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-[13px] font-semibold">分析策略</div>
-              <Button variant="secondary" size="sm" className="h-7 px-2 text-[11px]" onClick={newStrategy}>
-                <Plus className="h-3.5 w-3.5" /> 新建
-              </Button>
-            </div>
-            <div className="mb-3 flex flex-wrap gap-1.5">
-              {strategies.map((s) => (
-                <button
-                  key={s.id}
-                  className={`rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
-                    selectedId === s.id
-                      ? 'border-primary/50 bg-primary/10 text-primary'
-                      : 'border-border/60 text-muted-foreground hover:border-primary/40'
-                  }`}
-                  onClick={() => applyStrategy(s)}
-                >
-                  {s.name}
-                  {s.is_default ? ' ·默认' : ''}
-                </button>
-              ))}
-              {strategies.length === 0 && (
-                <span className="text-[12px] text-muted-foreground">暂无策略</span>
-              )}
-            </div>
-
-            <label className="mb-1 block text-[11px] text-muted-foreground">策略名称</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} className="mb-2" />
-            <label className="mb-1 block text-[11px] text-muted-foreground">说明</label>
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} className="mb-2" />
-
-            <div className="mb-1 flex items-center justify-between">
-              <label className="text-[11px] text-muted-foreground">策略提示词（喂给 AI 的 system prompt）</label>
-              <button className="text-[11px] text-primary" onClick={() => setEditingPrompt((v) => !v)}>
-                {editingPrompt ? '收起' : '编辑'}
+        {/* 左：策略配置 */}
+        <div className="rounded-lg border border-border/60 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[13px] font-semibold">分析策略</div>
+            <Button variant="secondary" size="sm" className="h-7 px-2 text-[11px]" onClick={newStrategy}>
+              <Plus className="h-3.5 w-3.5" /> 新建
+            </Button>
+          </div>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {strategies.map((s) => (
+              <button
+                key={s.id}
+                className={`rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
+                  selectedId === s.id
+                    ? 'border-primary/50 bg-primary/10 text-primary'
+                    : 'border-border/60 text-muted-foreground hover:border-primary/40'
+                }`}
+                onClick={() => applyStrategy(s)}
+              >
+                {s.name}
+                {s.is_default ? ' ·默认' : ''}
               </button>
-            </div>
-            {editingPrompt ? (
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                className="min-h-[220px] w-full resize-y rounded-lg border border-border bg-background px-3 py-2 font-mono text-[12px] text-foreground outline-none focus:border-primary/60"
-                spellCheck={false}
-              />
-            ) : (
-              <div className="max-h-[120px] overflow-hidden rounded-lg border border-border/50 bg-background/40 px-3 py-2 text-[11px] text-muted-foreground">
-                {prompt ? `${prompt.slice(0, 280)}${prompt.length > 280 ? '…' : ''}` : '（空）'}
-              </div>
-            )}
-
-            <div className="mt-3 flex items-center gap-2">
-              <Button size="sm" className="h-8" onClick={saveStrategy} disabled={saving || !dirty}>
-                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                保存策略
-              </Button>
-              {selected && !selected.is_default && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-8 text-destructive"
-                  onClick={removeStrategy}
-                  disabled={saving}
-                >
-                  <Trash2 className="h-3.5 w-3.5" /> 删除
-                </Button>
-              )}
-            </div>
+            ))}
+            {strategies.length === 0 && <span className="text-[12px] text-muted-foreground">暂无策略</span>}
           </div>
 
-          <div className="rounded-lg border border-border/60 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-[13px] font-semibold">策略池（{pool.length}）</div>
+          <label className="mb-1 block text-[11px] text-muted-foreground">策略名称</label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} className="mb-2" />
+          <label className="mb-1 block text-[11px] text-muted-foreground">说明</label>
+          <Input value={description} onChange={(e) => setDescription(e.target.value)} className="mb-2" />
+
+          <div className="mb-1 flex items-center justify-between">
+            <label className="text-[11px] text-muted-foreground">策略提示词（作 AI 的 system prompt）</label>
+            <button className="text-[11px] text-primary" onClick={() => setEditingPrompt((v) => !v)}>
+              {editingPrompt ? '收起' : '编辑'}
+            </button>
+          </div>
+          {editingPrompt ? (
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              className="min-h-[220px] w-full resize-y rounded-lg border border-border bg-background px-3 py-2 font-mono text-[12px] text-foreground outline-none focus:border-primary/60"
+              spellCheck={false}
+            />
+          ) : (
+            <div className="max-h-[120px] overflow-hidden rounded-lg border border-border/50 bg-background/40 px-3 py-2 text-[11px] text-muted-foreground">
+              {prompt ? `${prompt.slice(0, 280)}${prompt.length > 280 ? '…' : ''}` : '（空）'}
+            </div>
+          )}
+
+          <div className="mt-3 flex items-center gap-2">
+            <Button size="sm" className="h-8" onClick={saveStrategy} disabled={saving || !dirty}>
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              保存策略
+            </Button>
+            {selected && !selected.is_default && (
               <Button
                 variant="secondary"
                 size="sm"
-                className="h-7 px-2 text-[11px]"
-                onClick={importPositions}
-                disabled={importing}
+                className="h-8 text-destructive"
+                onClick={removeStrategy}
+                disabled={saving}
               >
-                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                导入持仓
+                <Trash2 className="h-3.5 w-3.5" /> 删除
               </Button>
+            )}
+          </div>
+        </div>
+
+        {/* 右：策略池 + 逐票分析入口 */}
+        <div className="rounded-lg border border-border/60 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[13px] font-semibold">策略池（{pool.length}）</div>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              onClick={importPositions}
+              disabled={importing}
+            >
+              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              导入持仓
+            </Button>
+          </div>
+
+          {/* 搜索添加 */}
+          <div className="mb-3">
+            <div className="mb-1.5 flex items-center gap-1">
+              {MARKET_TABS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => handleSearchMarketChange(opt.value)}
+                  className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
+                    searchMarket === opt.value
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-accent/50 text-muted-foreground hover:bg-accent'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
-            <div className="mb-2">
-              <div className="mb-1.5 flex items-center gap-1">
-                {MARKET_TABS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => handleSearchMarketChange(opt.value)}
-                    className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
-                      searchMarket === opt.value
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-accent/50 text-muted-foreground hover:bg-accent'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-              <div className="relative" ref={dropdownRef}>
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/50" />
-                <Input
-                  value={searchQuery}
-                  onChange={(e) => handleSearchInput(e.target.value)}
-                  onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
-                  placeholder="代码或名称，如 600519 或 茅台"
-                  className="pl-9"
-                  autoComplete="off"
-                />
-                {(searching || adding) && (
-                  <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-primary" />
-                )}
-                {showDropdown && searchResults.length > 0 && (
-                  <div className="absolute z-50 mt-1 max-h-52 w-full overflow-auto rounded-lg border border-border bg-card shadow-lg">
-                    {searchResults.map((item) => (
-                      <button
-                        key={`${item.market}-${item.symbol}`}
-                        type="button"
-                        onClick={() => selectStock(item)}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/50"
-                      >
-                        <span className="rounded bg-accent/60 px-1 py-0.5 text-[9px] text-muted-foreground">
-                          {MARKET_LABEL[item.market] || item.market}
-                        </span>
-                        <span className="font-mono text-[12px] text-muted-foreground">{item.symbol}</span>
-                        <span className="flex-1 text-foreground">{item.name}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              {pool.map((p) => {
-                const k = keyOf(p.market, p.symbol)
-                const busy = analyzingSymbol === k
-                return (
-                  <div
-                    key={p.id}
-                    className="flex items-center justify-between rounded-lg border border-border/50 bg-background/40 px-2.5 py-1.5 text-[12px]"
-                  >
-                    <div className="min-w-0">
-                      <span className="font-medium text-foreground">{p.name || p.symbol}</span>
-                      <span className="ml-1 font-mono text-[11px] text-muted-foreground">{p.symbol}</span>
-                      <span className="ml-1 text-[10px] text-muted-foreground">
-                        {MARKET_LABEL[p.market] || p.market}
-                        {p.source === 'position' ? ' ·持仓' : ''}
+            <div className="relative" ref={dropdownRef}>
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground/50" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => handleSearchInput(e.target.value)}
+                onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
+                placeholder="代码或名称，如 600519 或 茅台"
+                className="pl-9"
+                autoComplete="off"
+              />
+              {(searching || adding) && (
+                <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-primary" />
+              )}
+              {showDropdown && searchResults.length > 0 && (
+                <div className="absolute z-50 mt-1 max-h-52 w-full overflow-auto rounded-lg border border-border bg-card shadow-lg">
+                  {searchResults.map((item) => (
+                    <button
+                      key={`${item.market}-${item.symbol}`}
+                      type="button"
+                      onClick={() => selectStock(item)}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/50"
+                    >
+                      <span className="rounded bg-accent/60 px-1 py-0.5 text-[9px] text-muted-foreground">
+                        {MARKET_LABEL[item.market] || item.market}
                       </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
-                      <button
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => removePoolItem(p.id)}
-                        title="移除"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                )
-              })}
-              {pool.length === 0 && (
-                <div className="rounded-lg border border-dashed border-border/60 px-3 py-6 text-center text-[12px] text-muted-foreground">
-                  池子为空，点「导入持仓」或手动添加代码。
+                      <span className="font-mono text-[12px] text-muted-foreground">{item.symbol}</span>
+                      <span className="flex-1 text-foreground">{item.name}</span>
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
           </div>
-        </div>
 
-        {/* 右：分析结果 */}
-        <div className="rounded-lg border border-border/60">
-          <div className="flex items-center justify-between border-b border-border/60 px-4 py-2.5">
-            <div className="text-[13px] font-semibold">分析结果</div>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="h-7 px-2"
-              onClick={() => loadAll().catch(() => {})}
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-          <div className="divide-y divide-border/50">
-            {pool.map((p) => {
-              const k = keyOf(p.market, p.symbol)
-              const res = results[k]
-              const isOpen = expanded === k
-              return (
-                <div key={p.id} className="px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <button
-                      className="flex min-w-0 flex-1 items-start gap-2 text-left"
-                      onClick={() => setExpanded(isOpen ? null : k)}
-                      disabled={!res}
-                    >
-                      <ChevronDown
-                        className={`mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
-                          isOpen ? 'rotate-180' : ''
-                        } ${res ? '' : 'opacity-30'}`}
-                      />
-                      <div className="min-w-0">
-                        <div className="text-[13px] font-medium text-foreground">
-                          {p.name || p.symbol}
-                          <span className="ml-1.5 font-mono text-[11px] text-muted-foreground">{p.symbol}</span>
-                        </div>
-                        <div className="mt-0.5 line-clamp-2 text-[12px] text-muted-foreground">
-                          {res ? res.verdict || '（无结论摘要，展开查看）' : '尚未分析'}
-                        </div>
-                      </div>
-                    </button>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="h-7 shrink-0 px-2 text-[11px]"
-                      onClick={() => analyzeOne(p)}
-                      disabled={analyzingSymbol === k || analyzingAll || !selectedId}
-                    >
-                      {analyzingSymbol === k ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Bot className="h-3.5 w-3.5" />
-                      )}
-                      {res ? '重测' : '分析'}
-                    </Button>
-                  </div>
-                  {isOpen && res && (
-                    <div className="prose prose-sm mt-3 max-w-none rounded-lg bg-background/40 px-3 py-2 text-[12px] text-foreground dark:prose-invert">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{res.content}</ReactMarkdown>
-                      <div className="mt-2 text-[10px] text-muted-foreground">
-                        {res.strategy_name} · {res.model} · {res.created_at}
-                      </div>
-                    </div>
-                  )}
+          {/* 池列表 */}
+          <div className="space-y-1.5">
+            {pool.map((p) => (
+              <div
+                key={p.id}
+                className="flex items-center justify-between rounded-lg border border-border/50 bg-background/40 px-2.5 py-2 text-[12px]"
+              >
+                <div className="min-w-0">
+                  <span className="font-medium text-foreground">{p.name || p.symbol}</span>
+                  <span className="ml-1 font-mono text-[11px] text-muted-foreground">{p.symbol}</span>
+                  <span className="ml-1 text-[10px] text-muted-foreground">
+                    {MARKET_LABEL[p.market] || p.market}
+                    {p.source === 'position' ? ' ·持仓' : ''}
+                  </span>
                 </div>
-              )
-            })}
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    onClick={() => openStrategyChat(p)}
+                    disabled={!selectedId}
+                    title={selectedId ? '用所选策略开对话分析' : '请先选择策略'}
+                  >
+                    <MessageSquare className="h-3.5 w-3.5" /> 分析
+                  </Button>
+                  <button
+                    className="text-muted-foreground hover:text-destructive"
+                    onClick={() => removePoolItem(p.id)}
+                    title="移除"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
             {pool.length === 0 && (
-              <div className="px-4 py-12 text-center text-[12px] text-muted-foreground">
-                先把股票加入策略池，再点右上角「开始分析」。
+              <div className="rounded-lg border border-dashed border-border/60 px-3 py-8 text-center text-[12px] text-muted-foreground">
+                池子为空，点「导入持仓」或搜索代码添加，再对每只票点「分析」开对话。
               </div>
             )}
           </div>

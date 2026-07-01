@@ -8,6 +8,8 @@ interface StockContext {
   market: string
   stockName: string
   pageContext?: string
+  strategyId?: number
+  openingMessage?: string
 }
 
 export default function ChatWidget() {
@@ -63,12 +65,44 @@ export default function ChatWidget() {
         stock_symbol: detail.symbol,
         stock_market: detail.market,
         initial_context: detail.pageContext,
-      }).then((conv) => {
+        strategy_id: detail.strategyId,
+      }).then(async (conv) => {
         setActiveConvId(conv.id)
         setMessages([])
         setView('chat')
         setConversations((prev) => [conv, ...prev])
-        loadSuggestedQuestions(detail.symbol, detail.market)
+        // 策略对话不加载自选建议问题；普通对话保持原行为
+        if (!detail.strategyId) loadSuggestedQuestions(detail.symbol, detail.market)
+        // 若带开场白（如策略一键分析），自动发出首条消息
+        if (detail.openingMessage) {
+          const tempUserMsg: ChatMessage = {
+            id: Date.now(),
+            role: 'user',
+            content: detail.openingMessage,
+            created_at: new Date().toISOString(),
+          }
+          setMessages([tempUserMsg])
+          setSending(true)
+          try {
+            const reply = await chatApi.sendMessage(conv.id, detail.openingMessage)
+            setMessages([tempUserMsg, reply])
+            setConversations((prev) =>
+              prev.map((c) => (c.id === conv.id ? { ...c, title: c.title || detail.openingMessage!.slice(0, 20) } : c)),
+            )
+          } catch (e) {
+            setMessages([
+              tempUserMsg,
+              {
+                id: Date.now() + 1,
+                role: 'assistant',
+                content: `请求失败：${e instanceof Error ? e.message : '未知错误'}`,
+                created_at: new Date().toISOString(),
+              },
+            ])
+          } finally {
+            setSending(false)
+          }
+        }
       }).catch(() => {
         // fallback: just open chat
         setView('chat')

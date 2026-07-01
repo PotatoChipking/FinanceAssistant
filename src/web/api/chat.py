@@ -23,6 +23,7 @@ from src.web.models import (
     Position,
     Stock,
     StockSuggestion,
+    StrategyPrompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ class CreateConversationBody(BaseModel):
     stock_symbol: str | None = None
     stock_market: str | None = None
     initial_context: str | None = None
+    strategy_id: int | None = None
 
 
 class SendMessageBody(BaseModel):
@@ -376,6 +378,7 @@ def create_conversation(
         stock_symbol=body.stock_symbol if body else None,
         stock_market=body.stock_market if body else None,
         initial_context=body.initial_context if body else None,
+        strategy_id=body.strategy_id if body else None,
     )
     db.add(conv)
     db.commit()
@@ -385,6 +388,7 @@ def create_conversation(
         "title": conv.title or "",
         "stock_symbol": conv.stock_symbol,
         "stock_market": conv.stock_market,
+        "strategy_id": conv.strategy_id,
         "created_at": str(conv.created_at or ""),
     }
 
@@ -406,6 +410,7 @@ def list_conversations(
             "title": c.title or "",
             "stock_symbol": c.stock_symbol,
             "stock_market": c.stock_market,
+            "strategy_id": c.strategy_id,
             "created_at": str(c.created_at or ""),
         }
         for c in rows
@@ -429,6 +434,7 @@ def get_conversation(conversation_id: int, db: Session = Depends(get_db)):
             "title": conv.title or "",
             "stock_symbol": conv.stock_symbol,
             "stock_market": conv.stock_market,
+            "strategy_id": conv.strategy_id,
             "created_at": str(conv.created_at or ""),
         },
         "messages": [
@@ -484,8 +490,20 @@ async def send_message(
         # 构建消息列表
         messages_for_ai: list[dict] = []
 
-        # System prompt
-        system_content = SYSTEM_PROMPT
+        # System prompt：策略对话用策略提示词做人格，普通对话用通用助手
+        strategy = None
+        if conv.strategy_id:
+            strategy = (
+                db.query(StrategyPrompt).filter(StrategyPrompt.id == conv.strategy_id).first()
+            )
+        if strategy and strategy.prompt:
+            system_content = (
+                strategy.prompt
+                + "\n\n---\n你现在是上述策略的分析助手。请严格依据该策略，"
+                "结合下方提供的行情数据回答用户问题；数据不足时可调用工具补充。"
+            )
+        else:
+            system_content = SYSTEM_PROMPT
 
         # 绑定股票提示
         if conv.stock_symbol and conv.stock_market:
@@ -519,12 +537,25 @@ async def send_message(
 
         # 绑定股票的实时数据
         if conv.stock_symbol and conv.stock_market:
-            realtime = await _fetch_realtime_context(conv.stock_symbol, conv.stock_market)
-            if realtime:
-                context_parts.append(realtime)
-            technical = await _fetch_technical_context(conv.stock_symbol, conv.stock_market)
-            if technical:
-                context_parts.append(technical)
+            if strategy:
+                # 策略对话：注入当天实时行情 + 最近60根日K + 技术摘要（供策略逐项判断）
+                try:
+                    from src.web.api.strategy_analysis import _build_market_context
+
+                    market_ctx = await _build_market_context(
+                        conv.stock_symbol, conv.stock_market, 60
+                    )
+                    if market_ctx:
+                        context_parts.append(market_ctx)
+                except Exception as e:
+                    logger.warning(f"策略对话行情上下文构建失败: {e}")
+            else:
+                realtime = await _fetch_realtime_context(conv.stock_symbol, conv.stock_market)
+                if realtime:
+                    context_parts.append(realtime)
+                technical = await _fetch_technical_context(conv.stock_symbol, conv.stock_market)
+                if technical:
+                    context_parts.append(technical)
             stock_ctx = _build_stock_context(db, conv.stock_symbol, conv.stock_market)
             if stock_ctx:
                 context_parts.append(stock_ctx)

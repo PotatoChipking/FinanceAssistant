@@ -1414,6 +1414,7 @@ class ChatConversation(Base):
     stock_symbol = Column(String, nullable=True)
     stock_market = Column(String, nullable=True)
     ai_model_id = Column(Integer, nullable=True)
+    strategy_id = Column(Integer, nullable=True)  # 绑定策略提示词(StrategyPrompt)则为策略对话
     initial_context = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

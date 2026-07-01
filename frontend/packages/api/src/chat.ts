@@ -5,6 +5,7 @@ export interface ChatConversation {
   title: string
   stock_symbol?: string | null
   stock_market?: string | null
+  strategy_id?: number | null
   created_at: string
 }
 
@@ -21,7 +22,7 @@ export interface ConversationDetail {
 }
 
 export const chatApi = {
-  createConversation: (params?: { stock_symbol?: string; stock_market?: string; initial_context?: string }) =>
+  createConversation: (params?: { stock_symbol?: string; stock_market?: string; initial_context?: string; strategy_id?: number }) =>
     fetchAPI<ChatConversation>('/chat/conversations', {
       method: 'POST',
       body: JSON.stringify(params || {}),
