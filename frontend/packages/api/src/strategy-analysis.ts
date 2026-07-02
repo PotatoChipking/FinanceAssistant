@@ -18,6 +18,11 @@ export interface StrategyTags {
   support?: number | null
   pullback_support?: boolean
   volume_confirm?: 'strong' | 'weak' | 'neutral' | 'none' | string
+  score?: number | null
+  status?: string | null
+  event_age?: number | null
+  d0_vol_ratio?: number | null
+  blue_chip?: boolean | null
   action?: string
   action_label?: string
   reason?: string
@@ -147,6 +152,8 @@ export interface StrategyOverviewRow {
 export interface StrategyOverview {
   summary: string
   ranked: StrategyOverviewRow[]
+  // 已分析但无总分（未达可评分状态）→ 不参与排名，注明原因
+  excluded?: Array<{ symbol: string; market: string; name: string; reason: string }>
   unanalyzed: Array<{ symbol: string; market: string; name: string }>
   model: string
   analyzed_at: string

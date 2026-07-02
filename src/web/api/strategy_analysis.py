@@ -642,16 +642,30 @@ def _tags_brief(name: str, symbol: str, market: str, tags: dict) -> str:
         return dflt if v is None or v == "" else v
 
     return (
-        f"{name}（{market}:{symbol}）｜突破有效性={g('breakout')}｜"
-        f"距前高={g('gap_to_prev_high_pct')}%｜前高={g('prev_high')}｜支撑={g('support')}｜"
-        f"回踩支撑={g('pullback_support')}｜量价={g('volume_confirm')}｜"
-        f"建议={g('action_label') or g('action')}｜理由={g('reason')}"
+        f"{name}（{market}:{symbol}）｜评分={g('score')}｜状态={g('status')}｜"
+        f"突破有效性={g('breakout')}｜距前高={g('gap_to_prev_high_pct')}%｜前高={g('prev_high')}｜"
+        f"量价={g('volume_confirm')}｜建议={g('action_label') or g('action')}｜理由={g('reason')}"
+    )
+
+
+def _rank_sort_key(tags: dict) -> tuple:
+    """确定性排序键：总分降序 → 事件年龄升序 → D0量比降序 → 蓝筹优先（§8.2 平手裁决链）。"""
+    t = tags or {}
+    score = _num(t.get("score")) or 0.0
+    age = _num(t.get("event_age"))
+    vol = _num(t.get("d0_vol_ratio"))
+    blue = 1 if t.get("blue_chip") is True else 0
+    return (
+        -score,
+        age if age is not None else float("inf"),
+        -(vol if vol is not None else float("-inf")),
+        -blue,
     )
 
 
 @router.post("/overview")
 async def overview(payload: OverviewIn, db: Session = Depends(get_db)):
-    """把池内各票的最近结论汇总给 AI，按当前吸引力从高到低排序。"""
+    """总览排名：按各票分析产出的「总分」确定性排序（§8.2 平手裁决），AI 仅补点评。"""
     strategy = (
         db.query(StrategyPrompt).filter(StrategyPrompt.id == payload.strategy_id).first()
     )
@@ -674,81 +688,63 @@ async def overview(payload: OverviewIn, db: Session = Depends(get_db)):
             status_code=400, detail="策略池内暂无已分析的股票，请先对个股点「分析」生成结论"
         )
 
-    by_key = {f"{(it.market or 'CN').upper()}:{it.symbol}": it for it in analyzed}
-    brief_lines = [
-        f"{i}. " + _tags_brief(it.name or it.symbol, it.symbol, it.market or "CN", it.tags or {})
-        for i, it in enumerate(analyzed, 1)
+    # 有总分才进排名（对应策略里「仅 ValidActive 评分」的闸门）；无分的进剔除清单
+    rankable = [it for it in analyzed if _num((it.tags or {}).get("score")) is not None]
+    excluded = [
+        {
+            "symbol": it.symbol,
+            "market": it.market or "CN",
+            "name": it.name or it.symbol,
+            "reason": str((it.tags or {}).get("status") or "未评分（未达可评分状态）"),
+            "tags_updated_at": _iso(it.tags_updated_at),
+        }
+        for it in analyzed
+        if _num((it.tags or {}).get("score")) is None
     ]
-    user_content = (
-        "以下是策略池内各股票最近一次的分析结论：\n"
-        + "\n".join(brief_lines)
-        + "\n\n请依据上述策略标准，把这些股票按「当前买入/持有吸引力」从高到低排序，"
-        "综合考虑突破有效性、量价确认、回踩支撑与位置。\n"
-        "先用中文写一段总体点评，然后在末尾追加结构化排序（HTML 注释，用户看不到），格式严格如下：\n"
-        "<!--PANWATCH_JSON-->\n"
-        '{"summary": "一句话总览", "ranking": [{"symbol": "代码", "market": "CN", "score": 0-100整数, "reason": "一句话"}]}\n'
-        "<!--/PANWATCH_JSON-->\n"
-        "ranking 必须覆盖上面所有股票，best 在前。"
-    )
 
-    ai_client = _get_ai_client(db)
-    try:
-        content = await ai_client.chat(strategy.prompt, user_content, temperature=0.3)
-    except Exception as e:  # noqa: BLE001
-        logger.error("池子总览分析失败: %s", e)
-        raise HTTPException(status_code=502, detail=f"AI 分析失败：{e}") from e
+    rankable.sort(key=lambda it: _rank_sort_key(it.tags or {}))
+    ranked = [
+        {
+            "rank": i,
+            "symbol": it.symbol,
+            "market": it.market or "CN",
+            "name": it.name or it.symbol,
+            "score": _num((it.tags or {}).get("score")),
+            "reason": str((it.tags or {}).get("reason") or ""),
+            "tags": it.tags or {},
+            "tags_updated_at": _iso(it.tags_updated_at),
+        }
+        for i, it in enumerate(rankable, 1)
+    ]
 
-    parsed = try_extract_tagged_json(content) or {}
-    ranking_raw = parsed.get("ranking") if isinstance(parsed, dict) else None
-    summary = (parsed.get("summary") if isinstance(parsed, dict) else "") or ""
-
-    ranked: list[dict] = []
-    seen: set[str] = set()
-    for r in ranking_raw or []:
-        if not isinstance(r, dict):
-            continue
-        sym = str(r.get("symbol") or "").strip()
-        mkt = str(r.get("market") or "CN").strip().upper()
-        key = f"{mkt}:{sym}"
-        it = by_key.get(key)
-        if not it or key in seen:
-            continue
-        seen.add(key)
-        ranked.append(
-            {
-                "rank": len(ranked) + 1,
-                "symbol": it.symbol,
-                "market": it.market or "CN",
-                "name": it.name or it.symbol,
-                "score": r.get("score"),
-                "reason": str(r.get("reason") or ""),
-                "tags": it.tags or {},
-                "tags_updated_at": _iso(it.tags_updated_at),
-            }
+    # AI 只补一段总览点评（不参与排序），失败则留空，不影响排名
+    summary = ""
+    model = ""
+    if ranked:
+        brief_lines = [
+            f"{r['rank']}. " + _tags_brief(r["name"], r["symbol"], r["market"], r["tags"])
+            for r in ranked
+        ]
+        user_content = (
+            "以下是策略池内各股票已按总分从高到低排好序（排名已定，你不要再改动顺序）：\n"
+            + "\n".join(brief_lines)
+            + "\n\n请依据上述策略标准，用中文写一段总体点评（3~5句）：概述头部标的的共性、"
+            "需要注意的风险，以及当前整体机会。只做点评，不要输出任何排序或 JSON。"
         )
-    # AI 未覆盖的已分析股票，兜底追加到末尾
-    for it in analyzed:
-        key = f"{(it.market or 'CN').upper()}:{it.symbol}"
-        if key in seen:
-            continue
-        ranked.append(
-            {
-                "rank": len(ranked) + 1,
-                "symbol": it.symbol,
-                "market": it.market or "CN",
-                "name": it.name or it.symbol,
-                "score": None,
-                "reason": "",
-                "tags": it.tags or {},
-                "tags_updated_at": _iso(it.tags_updated_at),
-            }
-        )
+        ai_client = _get_ai_client(db)
+        model = getattr(ai_client, "model", "")
+        try:
+            summary = (await ai_client.chat(strategy.prompt, user_content, temperature=0.3) or "").strip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("池子总览点评生成失败（排名不受影响）: %s", e)
+            summary = ""
 
     result = {
-        "summary": summary or content.strip()[:400],
+        "summary": summary[:600],
         "ranked": ranked,
+        "excluded": excluded,
         "unanalyzed": unanalyzed,
-        "model": getattr(ai_client, "model", ""),
+        "model": model,
         "analyzed_at": _iso(datetime.now(timezone.utc)),
     }
     _save_overview(db, strategy.id, result)
@@ -765,16 +761,16 @@ def get_overview(strategy_id: int, db: Session = Depends(get_db)):
     """
     cached = _load_overview(db, strategy_id)
     if cached is None:
-        return {"summary": "", "ranked": [], "unanalyzed": [], "model": "", "analyzed_at": "", "stale": False}
+        return {"summary": "", "ranked": [], "excluded": [], "unanalyzed": [], "model": "", "analyzed_at": "", "stale": False}
 
     items = db.query(StrategyAnalysisPoolItem).all()
     by_key = {f"{(it.market or 'CN').upper()}:{it.symbol}": it for it in items}
-    ranked_keys: set[str] = set()
+    accounted: set[str] = set()  # 快照里已交代过的票（排名 + 剔除）
     stale = False
 
     for row in cached.get("ranked") or []:
         key = f"{str(row.get('market') or 'CN').upper()}:{row.get('symbol')}"
-        ranked_keys.add(key)
+        accounted.add(key)
         it = by_key.get(key)
         if it is None:
             # 该票已被移出池子 → 快照过期
@@ -786,12 +782,24 @@ def get_overview(strategy_id: int, db: Session = Depends(get_db)):
         if _iso(it.tags_updated_at) != (row.get("tags_updated_at") or ""):
             stale = True
 
-    # 排序后新分析出来的票（当时在 unanalyzed、现在有 tags）也算过期
+    # 剔除清单里的票同样纳入「已交代」，并检测其 tags 是否变化（可能已升级为可排名）
+    for row in cached.get("excluded") or []:
+        key = f"{str(row.get('market') or 'CN').upper()}:{row.get('symbol')}"
+        accounted.add(key)
+        it = by_key.get(key)
+        if it is None:
+            stale = True
+            continue
+        if _iso(it.tags_updated_at) != (row.get("tags_updated_at") or ""):
+            stale = True
+
+    # 排序后新分析出来、快照里没交代过的票 → 过期
     for it in items:
         key = f"{(it.market or 'CN').upper()}:{it.symbol}"
-        if it.tags and key not in ranked_keys:
+        if it.tags and key not in accounted:
             stale = True
             break
 
     cached["stale"] = stale
+    cached.setdefault("excluded", [])
     return cached

@@ -53,9 +53,9 @@ MAX_TOOL_ROUNDS = 5
 # 策略对话结束时附带的结构化标签，用于把关键信息标在股票上（用户不可见的 HTML 注释）
 STRATEGY_TAG_INSTRUCTION = """在你正常的中文分析之后，务必在回复最末尾追加一段结构化标签（HTML 注释，用户看不到），格式严格如下：
 <!--PANWATCH_JSON-->
-{"prev_high": 数字或null, "breakout": "valid|pending|failed|expired|none", "gap_to_prev_high_pct": 数字或null, "support": 数字或null, "pullback_support": true或false, "volume_confirm": "strong|weak|neutral|none", "action": "buy|add|reduce|sell|hold|watch|avoid", "action_label": "建仓|加仓|减仓|清仓|持有|观望|回避", "reason": "一句话理由"}
+{"prev_high": 数字或null, "breakout": "valid|pending|failed|expired|none", "gap_to_prev_high_pct": 数字或null, "support": 数字或null, "pullback_support": true或false, "volume_confirm": "strong|weak|neutral|none", "score": 整数或null, "status": "字符串或null", "event_age": 整数或null, "d0_vol_ratio": 数字或null, "blue_chip": true或false或null, "action": "buy|add|reduce|sell|hold|watch|avoid", "action_label": "建仓|加仓|减仓|清仓|持有|观望|回避", "reason": "一句话理由"}
 <!--/PANWATCH_JSON-->
-字段含义：prev_high=突破锚点前高价；breakout=突破有效性(valid有效/pending待确认/failed失败/expired已过期/none不符合)，此项必须与你正文的一句话结论保持一致（结论说"有效突破"就填 valid，说"待确认"才填 pending）；gap_to_prev_high_pct=现价相对前高的百分比(高于为正)；support=关键支撑位；pullback_support=是否已回踩到支撑附近；volume_confirm=量价确认强度；action/action_label=对该持仓的操作建议。数值用数字，不确定用 null，不要编造。"""
+字段含义：prev_high=突破锚点前高价；breakout=突破有效性(valid有效/pending待确认/failed失败/expired已过期/none不符合)，此项必须与你正文的一句话结论保持一致（结论说"有效突破"就填 valid，说"待确认"才填 pending）；gap_to_prev_high_pct=现价相对前高的百分比(高于为正)；support=关键支撑位；pullback_support=是否已回踩到支撑附近；volume_confirm=量价确认强度；score=该股在本策略下的综合评分整数（即你评分卡算出的总分；若策略无评分体系、或该股未达可评分状态则给 null，不要编造）；status=该股当前状态标签（如 ValidActive/Pending/Failed/Expired/Extended/Invalidated 等，没有则 null）；event_age=事件年龄即距突破日的交易日数（用于排序平手裁决，无则 null）；d0_vol_ratio=突破日量比 V0/V_BASE（平手裁决用，无则 null）；blue_chip=是否沪深300成份股（平手裁决用，无法确定给 null）；action/action_label=对该持仓的操作建议。数值用数字，不确定用 null，不要编造。"""
 
 
 def _apply_strategy_tags(db: Session, symbol: str, market: str, tags: dict) -> None:

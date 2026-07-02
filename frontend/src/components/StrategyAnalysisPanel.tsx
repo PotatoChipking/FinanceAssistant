@@ -760,6 +760,16 @@ export default function StrategyAnalysisPanel() {
                   </div>
                 ))}
               </div>
+              {(overview.excluded?.length ?? 0) > 0 && (
+                <div className="rounded-lg border border-dashed border-border/60 bg-background/40 px-3 py-2 text-[11px] text-muted-foreground">
+                  <div className="mb-1 font-medium">以下 {overview.excluded!.length} 只已分析但无总分、未参与排名：</div>
+                  {overview.excluded!.map((e) => (
+                    <div key={`${e.market}:${e.symbol}`}>
+                      · {e.name}（{e.symbol}）— {e.reason}
+                    </div>
+                  ))}
+                </div>
+              )}
               {overview.unanalyzed.length > 0 && (
                 <div className="rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-600">
                   以下 {overview.unanalyzed.length} 只尚未分析、未参与排序：
