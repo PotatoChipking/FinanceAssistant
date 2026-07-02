@@ -721,6 +721,19 @@ export default function StrategyAnalysisPanel() {
 
           {!overviewLoading && overview && overview.ranked.length > 0 && (
             <div className="max-h-[70vh] space-y-3 overflow-auto">
+              {overview.stale && (
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-600">
+                  <span>部分股票在本次排序后已重新分析，排序可能已过期。</span>
+                  <Button
+                    size="sm"
+                    className="h-6 shrink-0 px-2 text-[11px]"
+                    onClick={refreshOverview}
+                    disabled={overviewLoading}
+                  >
+                    <RefreshCw className="h-3 w-3" /> 刷新排序
+                  </Button>
+                </div>
+              )}
               {overview.summary && (
                 <div className="rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-[12px] leading-relaxed text-foreground">
                   {overview.summary}

@@ -711,6 +711,7 @@ async def overview(payload: OverviewIn, db: Session = Depends(get_db)):
                 "score": r.get("score"),
                 "reason": str(r.get("reason") or ""),
                 "tags": it.tags or {},
+                "tags_updated_at": _iso(it.tags_updated_at),
             }
         )
     # AI 未覆盖的已分析股票，兜底追加到末尾
@@ -727,6 +728,7 @@ async def overview(payload: OverviewIn, db: Session = Depends(get_db)):
                 "score": None,
                 "reason": "",
                 "tags": it.tags or {},
+                "tags_updated_at": _iso(it.tags_updated_at),
             }
         )
 
@@ -743,8 +745,41 @@ async def overview(payload: OverviewIn, db: Session = Depends(get_db)):
 
 @router.get("/overview")
 def get_overview(strategy_id: int, db: Session = Depends(get_db)):
-    """读取该策略最近一次的总览排序快照（不触发 AI）。"""
+    """读取该策略最近一次的总览排序快照（不触发 AI）。
+
+    读取时用池子当前 tags 回填每行徽章（避免显示排序时冻结的旧徽章），
+    并检测是否有票在排序后被重新分析过（tags_updated_at 变化 / 新增已分析票），
+    有则置 stale=True，前端提示「已更新，请刷新排序」。
+    """
     cached = _load_overview(db, strategy_id)
     if cached is None:
-        return {"summary": "", "ranked": [], "unanalyzed": [], "model": "", "analyzed_at": ""}
+        return {"summary": "", "ranked": [], "unanalyzed": [], "model": "", "analyzed_at": "", "stale": False}
+
+    items = db.query(StrategyAnalysisPoolItem).all()
+    by_key = {f"{(it.market or 'CN').upper()}:{it.symbol}": it for it in items}
+    ranked_keys: set[str] = set()
+    stale = False
+
+    for row in cached.get("ranked") or []:
+        key = f"{str(row.get('market') or 'CN').upper()}:{row.get('symbol')}"
+        ranked_keys.add(key)
+        it = by_key.get(key)
+        if it is None:
+            # 该票已被移出池子 → 快照过期
+            stale = True
+            continue
+        # 用当前 tags 回填徽章
+        row["tags"] = it.tags or {}
+        # tags 在排序后有变化（重新分析过）→ 过期
+        if _iso(it.tags_updated_at) != (row.get("tags_updated_at") or ""):
+            stale = True
+
+    # 排序后新分析出来的票（当时在 unanalyzed、现在有 tags）也算过期
+    for it in items:
+        key = f"{(it.market or 'CN').upper()}:{it.symbol}"
+        if it.tags and key not in ranked_keys:
+            stale = True
+            break
+
+    cached["stale"] = stale
     return cached

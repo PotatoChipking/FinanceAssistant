@@ -141,6 +141,7 @@ export interface StrategyOverviewRow {
   score: number | null
   reason: string
   tags: StrategyTags
+  tags_updated_at?: string
 }
 
 export interface StrategyOverview {
@@ -149,4 +150,6 @@ export interface StrategyOverview {
   unanalyzed: Array<{ symbol: string; market: string; name: string }>
   model: string
   analyzed_at: string
+  // 排序后有票被重新分析过 / 池子有增减 → 快照已过期，建议刷新排序
+  stale?: boolean
 }
