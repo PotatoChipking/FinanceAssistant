@@ -87,6 +87,40 @@ def try_extract_tagged_json(
     return obj if isinstance(obj, dict) else None
 
 
+# 结论文案 → breakout 枚举。按特异性从高到低匹配，避免「有效突破」被「突破」误判。
+_BREAKOUT_VERDICT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("failed", ("突破失败", "假突破", "突破无效", "突破未成立")),
+    ("expired", ("突破已过期", "突破过期", "突破失效")),
+    ("pending", ("突破待确认", "待确认", "有待确认", "尚未确认", "暂未确认")),
+    ("valid", ("有效突破", "突破有效", "突破已确认", "确认有效", "有效性成立")),
+    ("none", ("不符合", "无突破", "未突破", "未发生突破", "不构成突破")),
+]
+
+
+def infer_breakout_from_text(text: str) -> str | None:
+    """从结论/正文里推断 breakout 状态枚举，判断不出则返回 None。"""
+    raw = text or ""
+    for value, keywords in _BREAKOUT_VERDICT_PATTERNS:
+        if any(kw in raw for kw in keywords):
+            return value
+    return None
+
+
+def reconcile_breakout_tag(verdict_or_prose: str, tags: dict | None) -> dict | None:
+    """用 AI 的文字结论校正 breakout 标签，二者矛盾时以文字结论为准。
+
+    标签(结构化 JSON)与正文结论来自同一次回复，但模型偶尔会写「有效突破」却在
+    JSON 里给 pending。这里以用户实际读到的文字结论为准，保证徽章与结论一致。
+    """
+    if not isinstance(tags, dict):
+        return tags
+    inferred = infer_breakout_from_text(verdict_or_prose)
+    if inferred and tags.get("breakout") != inferred:
+        tags = dict(tags)
+        tags["breakout"] = inferred
+    return tags
+
+
 def strip_tagged_json(text: str, *, start: str = TAG_START, end: str = TAG_END) -> str:
     """Remove tagged JSON block from text (if present)."""
     raw = text or ""

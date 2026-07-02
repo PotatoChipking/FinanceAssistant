@@ -12,7 +12,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from src.web.api.chat import _get_ai_client
-from src.core.signals.structured_output import try_extract_tagged_json
+from src.core.signals.structured_output import (
+    reconcile_breakout_tag,
+    try_extract_tagged_json,
+)
 from src.web.database import get_db
 from src.web.models import (
     AppSettings,
@@ -443,13 +446,17 @@ async def _analyze_pool_item(
         return {"symbol": symbol, "market": market, "ok": False, "error": str(e)}
 
     tags = try_extract_tagged_json(content) or {}
+    verdict = _extract_verdict(content)
+    if isinstance(tags, dict) and tags:
+        # 以文字结论为准校正 breakout，避免徽章与结论不一致
+        tags = reconcile_breakout_tag(verdict or content, tags)
     return {
         "symbol": symbol,
         "market": market,
         "name": name,
         "ok": True,
         "content": content,
-        "verdict": _extract_verdict(content),
+        "verdict": verdict,
         "tags": tags if isinstance(tags, dict) else {},
     }
 
