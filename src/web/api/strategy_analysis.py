@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -30,12 +29,10 @@ from src.web.models import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 默认策略来源文档（首次自动灌入为「默认策略」）
-_DEFAULT_STRATEGY_DOC = (
-    Path(__file__).resolve().parents[3] / "docs" / "strategies" / "breakout-prev-high.md"
-)
-_DEFAULT_STRATEGY_NAME = "趋势突破前高有效性"
-_DEFAULT_STRATEGY_DESC = "二次筛选：判断观察池里的突破是否已被市场确认有效"
+# 默认策略：首次自动灌入一条空白模板，具体提示词由用户在 UI 里自行填写
+# （不再把任何策略内容放进仓库）
+_DEFAULT_STRATEGY_NAME = "我的策略"
+_DEFAULT_STRATEGY_DESC = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -95,21 +92,13 @@ def _result_row(row: StrategyAnalysisResult) -> dict:
 
 
 def _ensure_default_strategy(db: Session) -> None:
-    """池策略表为空时，用文档灌入一条默认策略。"""
+    """策略表为空时，灌入一条空白默认策略模板，具体内容由用户在 UI 填写。"""
     if db.query(StrategyPrompt).count() > 0:
         return
-    try:
-        prompt_text = _DEFAULT_STRATEGY_DOC.read_text(encoding="utf-8")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("读取默认策略文档失败：%s", e)
-        prompt_text = (
-            "你是一名严谨的 A 股技术分析师。请基于给定行情数据，"
-            "判断该股票当前是否符合「趋势突破前高且突破有效」的选股标准，给出明确结论与理由。"
-        )
     row = StrategyPrompt(
         name=_DEFAULT_STRATEGY_NAME,
         description=_DEFAULT_STRATEGY_DESC,
-        prompt=prompt_text,
+        prompt="在此填写你的选股/分析策略提示词（作为 AI 的 system prompt）。",
         is_default=True,
         enabled=True,
     )
