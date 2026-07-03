@@ -357,11 +357,6 @@ async def _build_market_context(symbol: str, market: str, kline_days: int = 120)
     try:
         klines = await asyncio.to_thread(collector.get_klines, symbol, kline_days + 30)
         klines = klines[-kline_days:] if klines else []
-        # 排查「AI 说 K 线不够」：打印实际喂给 AI 的日K根数
-        logger.info(
-            "策略行情上下文 %s(%s): 实际喂入日K %s 根（目标 %s）",
-            symbol, market, len(klines), kline_days,
-        )
         if klines:
             lines = format_daily_klines(klines, symbol=symbol, name=stock_name)
             parts.append("\n".join(lines))
