@@ -1,6 +1,51 @@
 """大盘情绪合成与缓存逻辑测试。"""
 
-from src.core.market_mood import _pick_column, compute_sentiment
+import pytest
+
+from src.core.market_mood import _parse_tencent_rank, _pick_column, compute_sentiment
+
+
+def _tencent_item(name: str, zljlr: str, zdf: str = "1.0") -> dict:
+    return {"name": name, "zljlr": zljlr, "zdf": zdf}
+
+
+def test_parse_tencent_rank_sort_and_total():
+    """腾讯板块排行按主力净流入排序,单位万元转亿,并给出全板块合计"""
+    payload = {
+        "data": {
+            "rank_list": [
+                _tencent_item("银行", "66832.19", "0.20"),
+                _tencent_item("电子", "-1372358.03", "-0.68"),
+                _tencent_item("传媒", "106550.54", "-0.08"),
+            ]
+        }
+    }
+    rows, total = _parse_tencent_rank(payload, top_n=1)
+    assert rows[0]["name"] == "传媒"
+    assert rows[0]["main_net_inflow_yi"] == 10.66
+    assert rows[-1]["name"] == "电子"
+    assert rows[-1]["main_net_inflow_yi"] == -137.24
+    assert total == round(10.66 + 6.68 - 137.24, 2)
+
+
+def test_parse_tencent_rank_skips_dirty_rows():
+    """脏值行(净流入非数值)被跳过,不影响其余板块"""
+    payload = {
+        "data": {
+            "rank_list": [
+                _tencent_item("银行", "66832.19"),
+                _tencent_item("坏行", "-"),
+            ]
+        }
+    }
+    rows, _ = _parse_tencent_rank(payload, top_n=3)
+    assert [r["name"] for r in rows] == ["银行"]
+
+
+def test_parse_tencent_rank_empty_raises():
+    """全部无效时抛异常,触发东财兜底"""
+    with pytest.raises(ValueError):
+        _parse_tencent_rank({"data": {"rank_list": [_tencent_item("坏行", "-")]}}, top_n=3)
 
 
 def test_sentiment_neutral_when_all_missing():

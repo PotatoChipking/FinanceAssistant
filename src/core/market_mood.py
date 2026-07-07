@@ -1,4 +1,4 @@
-"""大盘情绪与板块资金流:基于 akshare(东财/乐咕)接口,带内存缓存。"""
+"""大盘情绪与板块资金流:腾讯行情为主数据源,akshare(东财/乐咕)兜底,带内存缓存。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,16 @@ import threading
 import time
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger(__name__)
+
+TENCENT_BOARD_RANK_URL = "https://proxy.finance.qq.com/cgi/cgi-bin/rank/pt/getRank"
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q=s_sh000001,s_sz399001"
+TENCENT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://gu.qq.com/",
+}
 
 CACHE_TTL_SEC = 300  # 盘中资金流/情绪 5 分钟刷新足够
 
@@ -24,8 +33,82 @@ def _pick_column(columns: list[str], *keywords: str) -> str | None:
     return None
 
 
+def _parse_tencent_rank(payload: dict, top_n: int) -> tuple[list[dict[str, Any]], float]:
+    """解析腾讯板块排行返回:(前后 top_n 板块列表, 全部板块主力净流入合计亿)。"""
+    rank_list = ((payload.get("data") or {}).get("rank_list")) or []
+    parsed: list[dict[str, Any]] = []
+    for item in rank_list:
+        try:
+            inflow_yi = float(item["zljlr"]) / 10000.0  # 万元 → 亿
+        except Exception:
+            continue
+        try:
+            change = float(item.get("zdf"))
+        except Exception:
+            change = None
+        parsed.append(
+            {
+                "name": str(item.get("name") or ""),
+                "main_net_inflow_yi": round(inflow_yi, 2),
+                "main_net_ratio_pct": None,  # 腾讯接口无净占比字段
+                "change_pct": round(change, 2) if change is not None else None,
+            }
+        )
+    if not parsed:
+        raise ValueError("腾讯板块排行无有效数据")
+    parsed.sort(key=lambda r: r["main_net_inflow_yi"], reverse=True)
+    total_yi = sum(r["main_net_inflow_yi"] for r in parsed)
+    rows = parsed[:top_n] + parsed[-top_n:]
+    seen: set[str] = set()
+    deduped = []
+    for row in rows:
+        if row["name"] in seen:
+            continue
+        seen.add(row["name"])
+        deduped.append(row)
+    return deduped, round(total_yi, 2)
+
+
+def fetch_sector_flows_tencent(top_n: int = 5) -> tuple[list[dict[str, Any]], float]:
+    """腾讯行业板块主力资金排行(一次拉全量31个行业,本地按净流入排序)。"""
+    params = {
+        "board_type": "hy",
+        "sort_type": "price",
+        "direct": "down",
+        "offset": 0,
+        "count": 100,
+    }
+    with httpx.Client(timeout=8, follow_redirects=True) as client:
+        resp = client.get(TENCENT_BOARD_RANK_URL, params=params, headers=TENCENT_HEADERS)
+        payload = resp.json()
+    if payload.get("code") != 0:
+        raise ValueError(f"腾讯板块排行返回异常: {payload.get('msg')}")
+    return _parse_tencent_rank(payload, top_n)
+
+
+def fetch_index_changes_tencent() -> dict[str, Any]:
+    """沪深指数涨跌幅(腾讯简版行情,GBK编码,~ 分隔,字段5=涨跌幅)。"""
+    with httpx.Client(timeout=8, follow_redirects=True) as client:
+        resp = client.get(TENCENT_QUOTE_URL, headers=TENCENT_HEADERS)
+    text = resp.content.decode("gbk", errors="replace")
+    result: dict[str, Any] = {"sh_change_pct": None, "sz_change_pct": None}
+    for line in text.split(";"):
+        parts = line.split("~")
+        if len(parts) < 6:
+            continue
+        try:
+            change_pct = round(float(parts[5]), 2)
+        except Exception:
+            continue
+        if "sh000001" in parts[0]:
+            result["sh_change_pct"] = change_pct
+        elif "sz399001" in parts[0]:
+            result["sz_change_pct"] = change_pct
+    return result
+
+
 def fetch_sector_flows(top_n: int = 5) -> list[dict[str, Any]]:
-    """行业板块今日主力净流入排行(前 top_n 流入 + 后 top_n 流出)。"""
+    """行业板块今日主力净流入排行(前 top_n 流入 + 后 top_n 流出)——东财/akshare 版。"""
     import akshare as ak
 
     import pandas as pd
@@ -208,16 +291,38 @@ def _build_snapshot(top_n: int) -> dict[str, Any]:
         "errors": [],
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # 板块资金流:腾讯优先,东财(akshare)兜底;腾讯成功时全板块合计可直接当两市主力净流入
+    tencent_total_yi: float | None = None
     try:
-        data["sector_flows"] = fetch_sector_flows(top_n=top_n)
+        data["sector_flows"], tencent_total_yi = fetch_sector_flows_tencent(top_n=top_n)
+        data["sector_source"] = "tencent"
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[market_mood] 板块资金流获取失败: %s", exc)
-        data["errors"].append(f"板块资金流: {exc}")
-    try:
-        data["market_flow"] = fetch_market_flow()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[market_mood] 大盘资金流获取失败: %s", exc)
-        data["errors"].append(f"大盘资金流: {exc}")
+        logger.warning("[market_mood] 腾讯板块资金流失败,回退东财: %s", exc)
+        try:
+            data["sector_flows"] = fetch_sector_flows(top_n=top_n)
+            data["sector_source"] = "eastmoney"
+        except Exception as exc2:  # noqa: BLE001
+            logger.warning("[market_mood] 板块资金流获取失败: %s", exc2)
+            data["errors"].append(f"板块资金流: 腾讯[{exc}] 东财[{exc2}]")
+
+    if tencent_total_yi is not None:
+        market_flow: dict[str, Any] = {
+            "date": time.strftime("%Y-%m-%d"),
+            "main_net_inflow_yi": tencent_total_yi,
+            "sh_change_pct": None,
+            "sz_change_pct": None,
+        }
+        try:
+            market_flow.update(fetch_index_changes_tencent())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[market_mood] 腾讯指数行情失败: %s", exc)
+        data["market_flow"] = market_flow
+    else:
+        try:
+            data["market_flow"] = fetch_market_flow()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[market_mood] 大盘资金流获取失败: %s", exc)
+            data["errors"].append(f"大盘资金流: {exc}")
     try:
         data["activity"] = fetch_market_activity()
     except Exception as exc:  # noqa: BLE001
