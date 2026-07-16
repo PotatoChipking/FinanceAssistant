@@ -341,6 +341,11 @@ class PaperTradingEngine:
             )
         )
         selected_codes = resolve_enabled_strategy_codes_for_paper(db)
+        # 先在 SQL 层按已选策略过滤,避免未选策略的高分信号挤占 limit 名额
+        if selected_codes is not None:
+            if not selected_codes:
+                return 0, set(), [], skip_events
+            query = query.filter(StrategySignalRun.strategy_code.in_(selected_codes))
         # 按投资比例排除不投入（比例为 0）的市场
         alloc = market_allocations_or_default(account)
         excluded = [m for m in ALL_MARKETS if alloc.get(m, 0.0) <= 0]
