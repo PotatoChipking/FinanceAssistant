@@ -44,8 +44,10 @@ def _signal(
     entry_low: float = 9.5,
     entry_high: float = 10.5,
 ) -> StrategySignalRun:
+    from datetime import date
+
     return StrategySignalRun(
-        snapshot_date="2026-06-16",
+        snapshot_date=date.today().strftime("%Y-%m-%d"),
         stock_symbol=symbol,
         stock_market="CN",
         stock_name=symbol,
