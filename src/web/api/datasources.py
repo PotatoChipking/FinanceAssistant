@@ -21,12 +21,13 @@ TYPE_LABELS = {
     "quote": "实时行情",
     "events": "事件日历",
     "chart": "K线截图",
+    "discovery": "板块发现",
 }
 
 
 class DataSourceCreate(BaseModel):
     name: str
-    type: str  # news / kline / capital_flow / quote / events / chart
+    type: str  # news / kline / capital_flow / quote / events / chart / discovery
     provider: str
     config: dict = {}
     enabled: bool = True

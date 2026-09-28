@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { RefreshCw, Power, RotateCcw, X, TrendingUp, TrendingDown, Trophy, BarChart3, Wallet, Activity, Play, Bell, SlidersHorizontal, ListChecks } from 'lucide-react'
 import {
   paperTradingApi,
+  screenerApi,
   type PaperTradingAccountResponse,
   type PaperTradingPositionItem,
   type PaperTradingTradeItem,
@@ -186,6 +187,9 @@ export default function PaperTradingPage() {
   const [strategySelection, setStrategySelection] = useState<PaperTradingStrategySelection>({ mode: 'all', strategy_codes: [], top_n: 5 })
   const [strategyPool, setStrategyPool] = useState<PaperTradingStrategySelectionResponse['strategy_pool']>([])
   const [strategySaving, setStrategySaving] = useState(false)
+  const [topNEligibleCount, setTopNEligibleCount] = useState<number | null>(null)
+  const [runningFormulaId, setRunningFormulaId] = useState<number | null>(null)
+  const [formulaProgress, setFormulaProgress] = useState('')
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -250,7 +254,11 @@ export default function PaperTradingPage() {
     setScanning(true)
     try {
       const res = await paperTradingApi.scan()
-      toast(`扫描完成: 建仓 ${res.opened ?? 0} 笔, 平仓 ${res.closed ?? 0} 笔`, 'success')
+      if (res.status !== 'ok') {
+        toast(res.status === 'disabled' ? '模拟盘已暂停' : res.error || '扫描失败', 'error')
+      } else {
+        toast(res.diagnostic || `扫描完成: 建仓 ${res.opened ?? 0} 笔, 平仓 ${res.closed ?? 0} 笔`, 'success')
+      }
       loadData()
     } catch {
       toast('扫描失败', 'error')
@@ -344,6 +352,7 @@ export default function PaperTradingPage() {
       const data = await paperTradingApi.getStrategySelection()
       setStrategySelection(data.selection)
       setStrategyPool(data.strategy_pool || [])
+      setTopNEligibleCount(data.top_n_eligible_count ?? null)
     } catch {
       toast('加载策略选择失败', 'error')
     }
@@ -355,6 +364,7 @@ export default function PaperTradingPage() {
       const data = await paperTradingApi.updateStrategySelection(strategySelection)
       setStrategySelection(data.selection)
       setStrategyPool(data.strategy_pool || [])
+      setTopNEligibleCount(data.top_n_eligible_count ?? null)
       setStrategyOpen(false)
       toast('策略选择已保存', 'success')
     } catch {
@@ -371,6 +381,45 @@ export default function PaperTradingPage() {
       else set.add(code)
       return { ...prev, strategy_codes: Array.from(set) }
     })
+  }
+
+  const handleRunFormula = async (formulaId: number) => {
+    setRunningFormulaId(formulaId)
+    setFormulaProgress('正在启动选股…')
+    try {
+      const code = `screener:${formulaId}`
+      const nextSelection: PaperTradingStrategySelection = {
+        ...strategySelection,
+        mode: 'custom',
+        strategy_codes: Array.from(new Set([...(strategySelection.strategy_codes || []), code])),
+      }
+      const saved = await paperTradingApi.updateStrategySelection(nextSelection)
+      setStrategySelection(saved.selection)
+      const started = await screenerApi.createRun({ formula_id: formulaId })
+      let run = started
+      for (let attempt = 0; attempt < 300 && ['queued', 'running'].includes(run.status); attempt += 1) {
+        setFormulaProgress(`正在筛选 ${run.progress_current || 0}/${run.progress_total || '?'} 只股票…`)
+        await new Promise(resolve => window.setTimeout(resolve, 2000))
+        run = await screenerApi.getRun(started.id)
+      }
+      if (run.status !== 'success') {
+        throw new Error(run.error || (run.status === 'failed' ? '选股运行失败' : '选股仍在运行，请稍后查看结果'))
+      }
+      setFormulaProgress('正在生成模拟盘信号…')
+      const published = await paperTradingApi.createScreenerStrategy({ run_id: run.id, trigger_scan: true })
+      const refreshed = await paperTradingApi.getStrategySelection()
+      setStrategySelection(refreshed.selection)
+      setStrategyPool(refreshed.strategy_pool || [])
+      setTopNEligibleCount(refreshed.top_n_eligible_count ?? null)
+      const scan = published.scan
+      toast(`筛选 ${run.total_count} 只，命中 ${published.matched} 只；模拟盘建仓 ${scan?.opened ?? 0} 笔`, 'success')
+      loadData()
+    } catch (error: any) {
+      toast(error?.message || '公式运行失败', 'error')
+    } finally {
+      setRunningFormulaId(null)
+      setFormulaProgress('')
+    }
   }
 
   const handleSaveNotify = async () => {
@@ -820,7 +869,7 @@ export default function PaperTradingPage() {
         <DialogContent className="max-w-2xl max-h-[82vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>模拟盘策略选择</DialogTitle>
-            <DialogDescription>控制下一次扫描使用哪些策略池策略。未选择时可保持全部启用策略兼容模式。</DialogDescription>
+            <DialogDescription>自定义模式可选择已保存的选股公式；选中后每个工作日 15:25 刷新，也可立即运行。</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-5">
@@ -855,8 +904,13 @@ export default function PaperTradingPage() {
                   onChange={e => setStrategySelection(prev => ({ ...prev, top_n: Number(e.target.value) || 1 }))}
                   className="w-28 h-9 px-2 rounded-lg border border-border bg-background text-sm"
                 />
+                {topNEligibleCount === 0 && (
+                  <span className="block text-xs text-amber-600">暂无达到至少 5 笔已完成交易样本门槛的策略，Top N 当前不会产生建仓候选。</span>
+                )}
               </label>
             )}
+
+            {formulaProgress && <div className="text-xs text-primary">{formulaProgress}</div>}
 
             <div className="space-y-2">
               <div className="text-sm font-medium">策略池</div>
@@ -867,33 +921,48 @@ export default function PaperTradingPage() {
                   {strategyPool.map(strategy => {
                     const selected = (strategySelection.strategy_codes || []).includes(strategy.code)
                     const disabled = strategySelection.mode !== 'custom'
+                    const formulaId = strategy.code.startsWith('screener:')
+                      ? Number(strategy.code.slice('screener:'.length)) : null
                     return (
-                      <button
+                      <div
                         key={strategy.code}
-                        disabled={disabled}
-                        onClick={() => toggleStrategyCode(strategy.code)}
                         className={`w-full flex items-center justify-between gap-3 rounded-lg border p-3 text-left transition-all ${
                           selected && strategySelection.mode === 'custom'
                             ? 'border-primary/40 bg-primary/8'
                             : 'border-border bg-background hover:bg-accent/40'
-                        } ${disabled ? 'opacity-75 cursor-default' : ''}`}
+                        }`}
                       >
-                        <div className="min-w-0">
+                        <button
+                          type="button"
+                          disabled={disabled}
+                          onClick={() => toggleStrategyCode(strategy.code)}
+                          className={`min-w-0 flex-1 text-left ${disabled ? 'cursor-default' : ''}`}
+                        >
                           <div className="text-sm font-medium truncate">{strategy.name}</div>
                           <div className="text-xs text-muted-foreground font-mono truncate">{strategy.code}</div>
-                        </div>
+                          {formulaId !== null && Number.isInteger(formulaId) && (
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {strategy.latest_run
+                                ? `${strategy.latest_run.formula_current ? '' : '公式已修改 · '}${strategy.latest_run.status === 'success' ? `上次筛选 ${strategy.latest_run.total_count} 只，命中 ${strategy.latest_run.matched_count} 只` : `上次运行 ${strategy.latest_run.status}`}${strategy.latest_run.error ? ` · ${strategy.latest_run.error}` : ''}`
+                                : '尚未运行选股公式'}
+                              {` · 近期买入信号 ${strategy.fresh_signal_count ?? 0} 条`}
+                            </div>
+                          )}
+                        </button>
                         <div className="flex items-center gap-2 shrink-0">
                           {strategy.ranking?.score != null && (
                             <span className="text-xs text-muted-foreground">{Number(strategy.ranking.score).toFixed(1)}</span>
                           )}
-                          <span className={`text-xs px-2 py-0.5 rounded-full ${strategy.enabled ? 'bg-emerald-500/10 text-emerald-600' : 'bg-muted text-muted-foreground'}`}>
-                            {strategy.enabled ? '启用' : '停用'}
-                          </span>
+                          {formulaId !== null && Number.isInteger(formulaId) && (
+                            <Button size="sm" variant="outline" onClick={() => handleRunFormula(formulaId)} disabled={runningFormulaId !== null || strategySelection.mode !== 'custom' || !selected}>
+                              {runningFormulaId === formulaId ? '运行中…' : '立即运行'}
+                            </Button>
+                          )}
                           {strategySelection.mode === 'custom' && (
                             <span className={`w-4 h-4 rounded border ${selected ? 'bg-primary border-primary' : 'border-border'}`} />
                           )}
                         </div>
-                      </button>
+                      </div>
                     )
                   })}
                 </div>

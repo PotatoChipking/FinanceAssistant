@@ -365,7 +365,7 @@ class DataCollectorManager:
             source.name,
             source.type,
             "start",
-            f"开始测试，测试股票: {','.join(test_symbols)}",
+            "开始测试板块发现及成分股" if source.type == "discovery" else f"开始测试，测试股票: {','.join(test_symbols)}",
         )
 
         try:
@@ -490,6 +490,34 @@ class DataCollectorManager:
         elif source.type == "quote":
             # 按 provider 路由到对应 Provider,Tushare(暂无 quote)/YFinance 可正确测到。
             return await self._test_quote_source(source, test_symbols)
+
+        elif source.type == "discovery":
+            if source.provider != "eastmoney":
+                return CollectorResult(success=False, error=f"不支持的发现数据源: {source.provider}")
+            from src.core.providers.base import ProviderRequest
+            from src.core.providers.discovery.eastmoney import EastmoneyDiscoveryProvider
+
+            provider = EastmoneyDiscoveryProvider(config=source.config or {})
+            boards = await provider.fetch(
+                ProviderRequest(market="CN", extra=(("kind", "boards"), ("limit", 1)))
+            )
+            if not boards.success or not boards.data:
+                return CollectorResult(success=False, error=boards.error or "未获取到板块")
+            board = boards.data[0]
+            board_code = str(getattr(board, "code", "") or "")
+            stocks = await provider.fetch(
+                ProviderRequest(
+                    market="CN",
+                    extra=(("kind", "board_stocks"), ("board_code", board_code), ("limit", 5)),
+                )
+            )
+            if not stocks.success or not stocks.data:
+                return CollectorResult(success=False, error=stocks.error or f"板块 {board_code} 没有成分股")
+            return CollectorResult(
+                success=True,
+                data=[{"symbol": item.symbol, "name": item.name} for item in stocks.data[:5]],
+                count=len(stocks.data),
+            )
 
         elif source.type == "chart":
             from src.collectors.screenshot_collector import ScreenshotCollector

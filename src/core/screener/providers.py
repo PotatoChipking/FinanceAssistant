@@ -57,9 +57,13 @@ def normalize_universe_config(config: dict | None) -> dict:
 class PanWatchScreenerDataProvider:
     name = "panwatch"
 
+    def __init__(self) -> None:
+        self.board_errors: list[str] = []
+
     def resolve_universe(self, db: Session, config: dict, *, limit: int) -> list[ScreenerStock]:
         cfg = normalize_universe_config(config)
         rows: dict[str, ScreenerStock] = {}
+        self.board_errors = []
 
         if cfg["include_watchlist"]:
             stocks = (
@@ -91,10 +95,15 @@ class PanWatchScreenerDataProvider:
                 query = query.filter(WatchedBoard.board_code.in_(selected_codes))
             boards = query.order_by(WatchedBoard.sort_order.asc(), WatchedBoard.id.asc()).all()
             orchestrator = get_discovery_orchestrator()
-            per_board_limit = max(20, min(80, limit))
-            for board in boards:
+            for board_index, board in enumerate(boards):
                 if len(rows) >= limit:
                     break
+                # 默认板块池可能有数十个板块。动态分摊剩余名额，避免前几个
+                # 板块占满 300 只股票后，其余板块完全没有进入筛选。
+                remaining_boards = len(boards) - board_index
+                per_board_limit = max(
+                    1, min(80, (limit - len(rows) + remaining_boards - 1) // remaining_boards)
+                )
                 try:
                     resp = orchestrator.fetch_sync(
                         ProviderRequest(
@@ -113,6 +122,7 @@ class PanWatchScreenerDataProvider:
                         raise RuntimeError(resp.error or "empty board stocks")
                 except Exception as e:
                     logger.warning("fetch board stocks failed for %s: %s", board.board_code, e)
+                    self.board_errors.append(f"{board.board_name or board.board_code}: {e}")
                     continue
                 for it in items:
                     symbol = self._item_value(it, "symbol")

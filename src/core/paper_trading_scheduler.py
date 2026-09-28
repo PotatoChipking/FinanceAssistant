@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.core.paper_trading_engine import ENGINE
+from src.core.paper_screener import run_selected_paper_formulas
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,15 @@ class PaperTradingScheduler:
         except Exception as e:
             logger.exception(f"[模拟盘] 日终摘要通知异常: {e}")
 
+    async def _screener_job(self):
+        """盘后刷新模拟盘明确选中的自定义选股公式。"""
+        try:
+            result = await asyncio.to_thread(run_selected_paper_formulas)
+            if result["selected"]:
+                logger.info("[模拟盘] 自定义选股公式刷新完成: %s", result)
+        except Exception:
+            logger.exception("[模拟盘] 自定义选股公式刷新失败")
+
     def start(self):
         self.scheduler.add_job(
             self._scan_job,
@@ -85,6 +96,17 @@ class PaperTradingScheduler:
             hour=15,
             minute=30,
             id="paper_trading_summary",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        self.scheduler.add_job(
+            self._screener_job,
+            "cron",
+            day_of_week="mon-fri",
+            hour=15,
+            minute=25,
+            id="paper_trading_screener",
             replace_existing=True,
             coalesce=True,
             max_instances=1,

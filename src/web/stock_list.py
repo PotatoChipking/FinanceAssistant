@@ -60,14 +60,15 @@ EASTMONEY_BJ_PARAMS = {
 PAGE_SIZE = 100
 
 
-def _load_cache() -> list[dict] | None:
+def _load_cache(*, allow_stale: bool = False) -> list[dict] | None:
     if not os.path.exists(CACHE_FILE):
         return None
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if time.time() - data.get("ts", 0) < CACHE_TTL:
-            return data["stocks"]
+        stocks = data["stocks"]
+        if isinstance(stocks, list) and (allow_stale or time.time() - data.get("ts", 0) < CACHE_TTL):
+            return stocks
     except (json.JSONDecodeError, KeyError):
         pass
     return None
@@ -255,7 +256,9 @@ def _fetch_from_akshare() -> list[dict]:
 
 def refresh_stock_list() -> list[dict]:
     """拉取 A 股和港股列表并缓存"""
+    previous = _load_cache(allow_stale=True) or []
     stocks = []
+    cn_stocks = []
 
     # A 股: 东方财富优先，akshare 备用
     try:
@@ -298,6 +301,25 @@ def refresh_stock_list() -> list[dict]:
         logger.info(f"东方财富获取北交所列表成功: {len(bj_stocks)} 只")
     except Exception as e:
         logger.warning(f"东方财富获取北交所失败: {e}")
+
+    if not stocks and previous:
+        logger.warning("股票列表所有数据源均未返回数据，沿用过期缓存（%s 只）", len(previous))
+        return previous
+
+    if not cn_stocks and previous:
+        cached_cn = [s for s in previous if s.get("market") == "CN"]
+        if cached_cn:
+            seen = {(str(s.get("symbol") or ""), s.get("market")) for s in stocks}
+            for stock in cached_cn:
+                key = (str(stock.get("symbol") or ""), stock.get("market"))
+                if key not in seen:
+                    stocks.append(stock)
+                    seen.add(key)
+            logger.warning(
+                "A 股股票列表刷新失败，沿用过期缓存中的 %s 只 A 股；不覆盖原缓存",
+                len(cached_cn),
+            )
+            return stocks
 
     if stocks:
         _save_cache(stocks)

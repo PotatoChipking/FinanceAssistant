@@ -131,6 +131,8 @@ export interface PaperTradingScreenerStrategyResponse {
   created: number
   updated: number
   skipped: number
+  matched: number
+  already_published?: boolean
   scan?: { status: string; opened?: number; closed?: number } | null
 }
 
@@ -142,12 +144,23 @@ export interface PaperTradingStrategySelection {
 
 export interface PaperTradingStrategySelectionResponse {
   selection: PaperTradingStrategySelection
+  top_n_eligible_count?: number | null
   strategy_pool: Array<{
     code: string
     name: string
     enabled: boolean
     strategy_type?: string
+    source_ref_id?: number
     ranking?: Record<string, any>
+    fresh_signal_count?: number
+    latest_run?: {
+      status: string
+      total_count: number
+      matched_count: number
+      error: string
+      finished_at: string
+      formula_current: boolean
+    } | null
   }>
 }
 
@@ -202,7 +215,7 @@ export const paperTradingApi = {
     }),
 
   scan: () =>
-    fetchAPI<{ status: string; opened: number; closed: number; skipped?: number; skip_stats?: PaperTradingMetricsResponse['skip_stats'] }>('/paper-trading/scan', {
+    fetchAPI<{ status: string; opened: number; closed: number; diagnostic?: string; error?: string; skipped?: number; skip_stats?: PaperTradingMetricsResponse['skip_stats'] }>('/paper-trading/scan', {
       method: 'POST',
       timeoutMs: 30000,
     }),

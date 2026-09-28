@@ -144,12 +144,15 @@ def scan_market(*, limit: int | None = None, params: BreakoutParams | None = Non
     snapshot = _today()
     hits: list[tuple[dict, BreakoutValidityResult]] = []
     scanned = 0
+    evaluated = 0
     with ThreadPoolExecutor(max_workers=SCAN_MAX_WORKERS) as pool:
         futures = {pool.submit(_evaluate, s["symbol"], p): s for s in universe}
         for future in as_completed(futures):
             stock = futures[future]
             scanned += 1
             result = future.result()
+            if result is not None:
+                evaluated += 1
             if result and result.state == "valid_active":
                 hits.append((stock, result))
 
@@ -170,13 +173,19 @@ def scan_market(*, limit: int | None = None, params: BreakoutParams | None = Non
 
     elapsed = round(time.time() - started, 1)
     summary = {
+        "status": "data_unavailable" if not universe or not evaluated else ("partial" if evaluated < scanned else "ok"),
         "scanned": scanned,
+        "evaluated": evaluated,
+        "data_unavailable": scanned - evaluated,
         "universe": len(universe),
         "valid_active": len(hits),
         "symbols": [s["symbol"] for s, _ in hits],
         "elapsed_sec": elapsed,
     }
-    logger.info("[突破有效性] 扫描完成: %s", summary)
+    if summary["status"] == "data_unavailable":
+        logger.warning("[突破有效性] 股票池或 K 线不可用: %s", summary)
+    else:
+        logger.info("[突破有效性] 扫描完成: %s", summary)
     return summary
 
 

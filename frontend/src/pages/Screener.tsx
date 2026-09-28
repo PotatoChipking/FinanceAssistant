@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, CheckCircle2, Code2, Eye, LineChart, Loader2, Play, Plus, RefreshCw, Save, Search, Trash2 } from 'lucide-react'
 import {
-  marketEventsApi,
   paperTradingApi,
   screenerApi,
   stocksApi,
+  type ScreenerBoardItem,
   type ScreenerFormulaItem,
   type ScreenerFunctionCatalog,
   type ScreenerProviderCatalogItem,
   type ScreenerResultItem,
   type ScreenerRunItem,
-  type WatchedBoardItem,
 } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
 import { Input } from '@panwatch/base-ui/components/ui/input'
@@ -96,7 +95,7 @@ export default function ScreenerPage() {
   const [catalog, setCatalog] = useState<ScreenerFunctionCatalog | null>(null)
   const [providers, setProviders] = useState<ScreenerProviderCatalogItem[]>([])
   const [formulas, setFormulas] = useState<ScreenerFormulaItem[]>([])
-  const [boards, setBoards] = useState<WatchedBoardItem[]>([])
+  const [boards, setBoards] = useState<ScreenerBoardItem[]>([])
   const [runs, setRuns] = useState<ScreenerRunItem[]>([])
   const [selectedFormulaId, setSelectedFormulaId] = useState<number | null>(null)
   const [name, setName] = useState('均线金叉未过热')
@@ -106,6 +105,7 @@ export default function ScreenerPage() {
   const [includeBoards, setIncludeBoards] = useState(true)
   const [provider, setProvider] = useState('panwatch')
   const [selectedBoards, setSelectedBoards] = useState<string[]>([])
+  const [showAllBoards, setShowAllBoards] = useState(false)
   const [saving, setSaving] = useState(false)
   const [running, setRunning] = useState(false)
   const [sendingToPaper, setSendingToPaper] = useState(false)
@@ -115,6 +115,7 @@ export default function ScreenerPage() {
   const [klineTarget, setKlineTarget] = useState<ScreenerResultItem | null>(null)
   const [analysisTarget, setAnalysisTarget] = useState<ScreenerResultItem | null>(null)
   const pollRef = useRef<ReturnType<typeof window.setInterval> | null>(null)
+  const initialFormulaLoaded = useRef(false)
 
   const selectedProvider = providers.find((x) => x.name === provider)
   const providerAvailable = selectedProvider ? selectedProvider.available : provider === 'panwatch'
@@ -131,15 +132,15 @@ export default function ScreenerPage() {
       screenerApi.functions().catch(() => null),
       screenerApi.providerCatalog().catch(() => ({ items: [] })),
       screenerApi.listFormulas().catch(() => ({ items: [] })),
-      marketEventsApi.listWatchedBoards().catch(() => []),
+      screenerApi.listBoards().catch(() => ({ items: [] })),
       screenerApi.listRuns(10).catch(() => ({ items: [] })),
     ])
     setCatalog(funcRes)
     setProviders(providerRes.items || [])
     setFormulas(formulaRes.items || [])
-    setBoards(boardRes || [])
+    setBoards(boardRes.items || [])
     setRuns(runRes.items || [])
-    if ((formulaRes.items || []).length > 0 && selectedFormulaId == null) {
+    if (!initialFormulaLoaded.current && (formulaRes.items || []).length > 0) {
       const first = formulaRes.items[0]
       setSelectedFormulaId(first.id)
       setName(first.name)
@@ -151,7 +152,8 @@ export default function ScreenerPage() {
       setIncludeBoards(cfg.include_watched_boards !== false)
       setSelectedBoards(Array.isArray(cfg.board_codes) ? cfg.board_codes : [])
     }
-  }, [selectedFormulaId])
+    initialFormulaLoaded.current = true
+  }, [])
 
   useEffect(() => {
     loadInitial().catch((e) => setMessage(e?.message || '加载选股配置失败'))
@@ -207,6 +209,9 @@ export default function ScreenerPage() {
       setDescription('')
       setFormula(DEFAULT_FORMULA)
       setProvider('panwatch')
+      setIncludeWatchlist(true)
+      setIncludeBoards(true)
+      setSelectedBoards([])
       setMessage('公式已删除')
       await loadInitial()
     } catch (e: any) {
@@ -253,9 +258,12 @@ export default function ScreenerPage() {
     setMessage('')
     setCurrentRun(null)
     try {
+      const savedFormula = formulas.find((row) => row.id === selectedFormulaId)
+      const savedVersion = savedFormula?.formula.trim() === formula.trim()
+        && JSON.stringify(savedFormula.universe_config) === JSON.stringify(universeConfig)
       const run = await screenerApi.createRun({
-        formula_id: selectedFormulaId,
-        formula: selectedFormulaId ? undefined : formula,
+        formula_id: savedVersion ? selectedFormulaId : null,
+        formula,
         universe_config: universeConfig,
       })
       setCurrentRun(run)
@@ -267,13 +275,13 @@ export default function ScreenerPage() {
   }
 
   const sendCurrentRunToPaper = async () => {
-    if (!currentRun || currentRun.status !== 'success' || !results.length || sendingToPaper) return
+    if (!currentRun || currentRun.status !== 'success' || !currentRun.formula_id || sendingToPaper) return
     setSendingToPaper(true)
     setMessage('')
     try {
       const res = await paperTradingApi.createScreenerStrategy({
         run_id: currentRun.id,
-        max_results: Math.min(20, results.length),
+        max_results: 20,
         trigger_scan: true,
       })
       const opened = res.scan?.opened ?? 0
@@ -294,9 +302,8 @@ export default function ScreenerPage() {
   const progressTotal = currentRun?.progress_total || currentRun?.total_count || 0
   const progressCurrent = currentRun?.progress_current || 0
   const progressPct = progressTotal > 0 ? Math.min(100, Math.round((progressCurrent / progressTotal) * 100)) : 0
-  const selectedBoardNames = selectedBoards.length
-    ? boards.filter((b) => selectedBoards.includes(b.board_code)).map((b) => b.board_name)
-    : boards.map((b) => b.board_name)
+  const selectedBoardNames = boards.filter((b) => selectedBoards.includes(b.board_code)).map((b) => b.board_name)
+  const visibleBoards = showAllBoards ? boards : boards.slice(0, 12)
 
   return (
     <div className="mx-auto max-w-7xl space-y-5">
@@ -305,7 +312,7 @@ export default function ScreenerPage() {
           <div className="text-[12px] text-muted-foreground">公式选股 / 关注池与板块成分股</div>
           <h1 className="mt-1 text-2xl font-semibold tracking-normal text-foreground">选股工作台</h1>
           <p className="mt-2 max-w-2xl text-[13px] text-muted-foreground">
-            用通达信风格公式筛选自选股和关注板块成分股，命中后可加入自选、查看 K 线或触发 TradingAgents 单股深度分析。
+            用通达信风格公式筛选自选股和板块池成分股，命中后可加入自选、查看 K 线或触发 TradingAgents 单股深度分析。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -343,6 +350,9 @@ export default function ScreenerPage() {
                   setDescription('')
                   setFormula(DEFAULT_FORMULA)
                   setProvider('panwatch')
+                  setIncludeWatchlist(true)
+                  setIncludeBoards(true)
+                  setSelectedBoards([])
                 }}
               >
                 新建
@@ -376,16 +386,16 @@ export default function ScreenerPage() {
               <input type="checkbox" checked={includeWatchlist} onChange={(e) => setIncludeWatchlist(e.target.checked)} />
             </label>
             <label className="mb-3 flex items-center justify-between rounded-lg border border-border/60 bg-background/40 px-3 py-2 text-[12px]">
-              <span>关注板块成分股</span>
+              <span>板块池成分股</span>
               <input type="checkbox" checked={includeBoards} onChange={(e) => setIncludeBoards(e.target.checked)} />
             </label>
             <div className="mb-2 flex items-center justify-between text-[11px] text-muted-foreground">
               <span>板块选择</span>
-              <button className="text-primary" onClick={() => setSelectedBoards([])}>全部关注板块</button>
+              <button className="text-primary" onClick={() => setSelectedBoards([])}>全部板块</button>
             </div>
             <div className="flex flex-wrap gap-2">
-              {boards.length === 0 && <span className="text-[12px] text-muted-foreground">暂无关注板块，可先在事件页添加。</span>}
-              {boards.map((board) => {
+              {boards.length === 0 && <span className="text-[12px] text-muted-foreground">板块池为空，可先在板块池页添加。</span>}
+              {visibleBoards.map((board) => {
                 const active = selectedBoards.length === 0 || selectedBoards.includes(board.board_code)
                 return (
                   <button
@@ -395,13 +405,20 @@ export default function ScreenerPage() {
                     }`}
                     onClick={() => toggleBoard(board.board_code)}
                   >
-                    {board.board_name}
+                    {board.tier === 'pinned' ? '★ ' : ''}{board.board_name}
                   </button>
                 )
               })}
             </div>
+            {boards.length > 12 && (
+              <button className="mt-2 text-[11px] text-primary" onClick={() => setShowAllBoards((value) => !value)}>
+                {showAllBoards ? '收起板块' : `查看全部 ${boards.length} 个板块`}
+              </button>
+            )}
             <div className="mt-3 rounded-lg bg-accent/20 px-3 py-2 text-[11px] text-muted-foreground">
-              当前范围：{includeWatchlist ? '自选股' : ''}{includeWatchlist && includeBoards ? ' + ' : ''}{includeBoards ? selectedBoardNames.join('、') || '全部关注板块' : ''}
+              当前范围：{includeWatchlist ? '自选股' : ''}{includeWatchlist && includeBoards ? ' + ' : ''}
+              {includeBoards ? selectedBoards.length ? selectedBoardNames.join('、') || '所选板块已不在板块池' : `全部 ${boards.length} 个板块` : ''}
+              {' · 最多筛选 300 只股票'}
             </div>
             <div className="mt-3">
               <div className="mb-2 text-[11px] text-muted-foreground">数据源 Provider</div>
@@ -502,7 +519,7 @@ export default function ScreenerPage() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {currentRun?.status === 'success' && results.length > 0 && (
+                {currentRun?.status === 'success' && currentRun.formula_id && (
                   <Button
                     variant="secondary"
                     size="sm"
@@ -513,6 +530,9 @@ export default function ScreenerPage() {
                     {sendingToPaper ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                     模拟
                   </Button>
+                )}
+                {currentRun?.status === 'success' && !currentRun.formula_id && (
+                  <span className="text-[11px] text-muted-foreground">保存公式后可用于模拟盘</span>
                 )}
                 {running && <div className="flex items-center gap-2 text-[12px] text-primary"><Loader2 className="h-4 w-4 animate-spin" /> 正在筛选</div>}
               </div>
@@ -531,7 +551,7 @@ export default function ScreenerPage() {
             )}
 
             {currentRun?.error && (
-              <div className="m-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[12px] text-rose-500">
+              <div className={`m-4 rounded-lg border px-3 py-2 text-[12px] ${currentRun.status === 'success' ? 'border-amber-500/30 bg-amber-500/10 text-amber-600' : 'border-rose-500/30 bg-rose-500/10 text-rose-500'}`}>
                 {currentRun.error}
               </div>
             )}
@@ -576,7 +596,9 @@ export default function ScreenerPage() {
                   {!results.length && (
                     <tr>
                       <td colSpan={6} className="px-4 py-12 text-center text-muted-foreground">
-                        {currentRun?.status === 'success' ? '本次没有命中股票。' : '暂无结果。'}
+                        {currentRun?.status === 'success'
+                          ? currentRun.total_count === 0 ? '本次股票池为空。' : `本次筛选 ${currentRun.total_count} 只股票，没有命中。`
+                          : '暂无结果。'}
                       </td>
                     </tr>
                   )}

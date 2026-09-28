@@ -1,8 +1,7 @@
 """模拟盘 API 端点。"""
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -13,6 +12,7 @@ from src.config import Settings
 from src.core.paper_trading_engine import (
     ALL_MARKETS,
     ENGINE,
+    SIGNAL_MAX_AGE_DAYS,
     SKIP_STATS_KEY,
     compute_market_cash,
     market_allocations_or_default,
@@ -21,10 +21,10 @@ from src.core.paper_trading_engine import (
 from src.core.strategy_pool import (
     get_paper_strategy_selection,
     list_strategy_pool,
-    register_screener_strategy,
+    resolve_enabled_strategy_codes_for_paper,
     save_paper_strategy_selection,
 )
-from src.core.trade_rules import get_trade_rules
+from src.core.paper_screener import publish_screener_run
 from src.web.database import get_db
 from src.web.models import (
     AppSettings,
@@ -33,8 +33,8 @@ from src.web.models import (
     PaperTradingPosition,
     PaperTradingTrade,
     StockScreenerFormula,
-    StockScreenerResult,
     StockScreenerRun,
+    StrategyCatalog,
     StrategySignalRun,
 )
 
@@ -79,36 +79,6 @@ class StrategySelectionBody(BaseModel):
     top_n: int = 5
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except Exception:
-        return None
-
-
-def _rule_float(rules: dict | None, path: str, default: float) -> float:
-    node: Any = rules or {}
-    try:
-        for part in path.split("."):
-            node = node[part]
-        return float(node)
-    except Exception:
-        return float(default)
-
-
-def _strategy_code_for_screener(run: StockScreenerRun) -> str:
-    return f"screener:{run.formula_id or run.id}"
-
-
-def _strategy_name_for_screener(run: StockScreenerRun) -> str:
-    formula = run.formula
-    if formula and formula.name:
-        return f"选股策略: {formula.name}"
-    return f"选股策略 #{run.formula_id or run.id}"
-
-
 def _resolve_screener_run(db: Session, payload: ScreenerStrategyBody) -> StockScreenerRun:
     if payload.run_id:
         run = db.query(StockScreenerRun).filter(StockScreenerRun.id == payload.run_id).first()
@@ -138,6 +108,60 @@ def _resolve_screener_run(db: Session, payload: ScreenerStrategyBody) -> StockSc
         return run
 
     raise HTTPException(400, "缺少 run_id 或 formula_id")
+
+
+def _strategy_selection_response(db: Session) -> dict:
+    selection = get_paper_strategy_selection(db)
+    pool = list_strategy_pool(enabled_only=True).get("items", [])
+    by_code = {item["code"]: item for item in pool}
+    formulas = db.query(StockScreenerFormula).filter(
+        StockScreenerFormula.enabled.is_(True)
+    ).order_by(StockScreenerFormula.id.asc()).all()
+    codes = [f"screener:{formula.id}" for formula in formulas]
+    catalog = {
+        row.code: row for row in db.query(StrategyCatalog)
+        .filter(StrategyCatalog.code.in_(codes)).all()
+    } if codes else {}
+    fresh_after = (datetime.now(timezone.utc) - timedelta(days=SIGNAL_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+    for formula in formulas:
+        code = f"screener:{formula.id}"
+        if code in catalog and not catalog[code].enabled:
+            continue
+        if code not in by_code:
+            item = {
+                "code": code,
+                "name": f"选股公式: {formula.name}",
+                "enabled": True,
+                "strategy_type": "screener_formula",
+                "source_ref_id": formula.id,
+                "ranking": {},
+            }
+            pool.append(item)
+            by_code[code] = item
+        item = by_code[code]
+        latest = db.query(StockScreenerRun).filter(
+            StockScreenerRun.formula_id == formula.id
+        ).order_by(StockScreenerRun.id.desc()).first()
+        item["latest_run"] = ({
+            "status": latest.status,
+            "total_count": latest.total_count or 0,
+            "matched_count": latest.matched_count or 0,
+            "error": latest.error or "",
+            "finished_at": _format_dt(latest.finished_at),
+            "formula_current": latest.formula_snapshot == formula.formula,
+        } if latest else None)
+        item["fresh_signal_count"] = db.query(StrategySignalRun).filter(
+            StrategySignalRun.strategy_code == code,
+            StrategySignalRun.status == "active",
+            StrategySignalRun.action == "buy",
+            StrategySignalRun.snapshot_date >= fresh_after,
+        ).count()
+    enabled_top_n = resolve_enabled_strategy_codes_for_paper(db) if selection.get("mode") == "top_n" else None
+    return {
+        "selection": selection,
+        "strategy_pool": pool,
+        "top_n_eligible_count": len(enabled_top_n) if enabled_top_n is not None else None,
+    }
 
 
 def _serialize_account_dict(
@@ -629,25 +653,39 @@ def update_settings(body: UpdateSettingsBody, db: Session = Depends(get_db)):
 
 @router.get("/strategy-selection")
 def get_strategy_selection(db: Session = Depends(get_db)):
-    return {
-        "selection": get_paper_strategy_selection(db),
-        "strategy_pool": list_strategy_pool(enabled_only=True).get("items", []),
-    }
+    return _strategy_selection_response(db)
 
 
 @router.post("/strategy-selection")
 def update_strategy_selection(body: StrategySelectionBody, db: Session = Depends(get_db)):
-    selection = save_paper_strategy_selection(body.model_dump(), db)
-    return {
-        "selection": selection,
-        "strategy_pool": list_strategy_pool(enabled_only=True).get("items", []),
-    }
+    save_paper_strategy_selection(body.model_dump(), db)
+    return _strategy_selection_response(db)
 
 
 @router.post("/scan")
-async def manual_scan():
+async def manual_scan(db: Session = Depends(get_db)):
     """手动触发一次模拟盘扫描（建仓 + 平仓检查）。"""
     result = await ENGINE.scan_once()
+    if result.get("status") == "ok" and not result.get("opened"):
+        selected = resolve_enabled_strategy_codes_for_paper(db)
+        if selected is not None and not selected:
+            mode = get_paper_strategy_selection(db).get("mode")
+            result["diagnostic"] = (
+                "Top N 暂无达到样本门槛的策略" if mode == "top_n" else "尚未选择模拟盘策略"
+            )
+        else:
+            fresh_after = (datetime.now(timezone.utc) - timedelta(days=SIGNAL_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+            signals = db.query(StrategySignalRun).filter(
+                StrategySignalRun.status == "active",
+                StrategySignalRun.action.in_(["buy", "add"]),
+                StrategySignalRun.entry_low.isnot(None),
+                StrategySignalRun.entry_high.isnot(None),
+                StrategySignalRun.snapshot_date >= fresh_after,
+            )
+            if selected is not None:
+                signals = signals.filter(StrategySignalRun.strategy_code.in_(selected))
+            if signals.count() == 0:
+                result["diagnostic"] = "所选策略近两天没有有效买入信号；请运行选股公式或等待盘后扫描"
     return result
 
 
@@ -656,140 +694,26 @@ async def create_signals_from_screener_strategy(
     payload: ScreenerStrategyBody,
     db: Session = Depends(get_db),
 ):
-    """把一次选股运行结果转成模拟盘可执行的自定义策略信号。"""
+    """Publish one fresh saved-formula run, then optionally scan the paper account."""
     run = _resolve_screener_run(db, payload)
-    if run.status != "success":
-        raise HTTPException(400, "只能使用成功完成的选股结果生成模拟盘信号")
-
-    query = (
-        db.query(StockScreenerResult)
-        .filter(StockScreenerResult.run_id == run.id, StockScreenerResult.matched == True)
-    )
-    if payload.min_change_pct is not None:
-        query = query.filter(StockScreenerResult.change_pct >= float(payload.min_change_pct))
-    results = (
-        query.order_by(
-            StockScreenerResult.change_pct.desc(),
-            StockScreenerResult.id.asc(),
+    try:
+        published = publish_screener_run(
+            db,
+            run,
+            max_results=payload.max_results,
+            min_change_pct=payload.min_change_pct,
         )
-        .limit(payload.max_results)
-        .all()
-    )
-    if not results:
-        raise HTTPException(400, "本次选股没有可用于模拟盘的命中结果")
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-    rules = get_trade_rules(db)
-    entry_band_pct = _rule_float(rules, "risk.entry_band_pct", 0.01)
-    stop_loss_pct = _rule_float(rules, "risk.paper_fallback_stop_loss_pct", 0.08)
-    target_profit_pct = _rule_float(rules, "risk.paper_fallback_target_profit_pct", 0.15)
-    snapshot = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if run.formula_id:
-        strategy_item = register_screener_strategy(
-            int(run.formula_id),
-            run_config={"max_results": payload.max_results},
-        )
-        strategy_code = strategy_item["code"]
-        strategy_name = strategy_item["name"]
-    else:
-        strategy_code = _strategy_code_for_screener(run)
-        strategy_name = _strategy_name_for_screener(run)
-    created = 0
-    updated = 0
-    skipped = 0
+    selection = get_paper_strategy_selection(db)
+    code = published["strategy_code"]
+    if selection["mode"] == "custom" and code not in selection["strategy_codes"]:
+        selection["strategy_codes"].append(code)
+        save_paper_strategy_selection(selection, db)
 
-    for idx, item in enumerate(results):
-        price = _safe_float(item.last_close)
-        if price is None or price <= 0:
-            skipped += 1
-            continue
-        change = _safe_float(item.change_pct) or 0.0
-        score = max(45.0, min(95.0, 72.0 + change))
-        rank_score = score + max(0.0, (len(results) - idx) * 0.01)
-        indicators = item.indicators if isinstance(item.indicators, dict) else {}
-        evidence = [
-            f"选股公式命中: {strategy_name}",
-            f"最近收盘价 {price:.2f}",
-        ]
-        if item.board_name:
-            evidence.append(f"来源板块: {item.board_name}")
-
-        row = (
-            db.query(StrategySignalRun)
-            .filter(
-                StrategySignalRun.snapshot_date == snapshot,
-                StrategySignalRun.stock_symbol == item.symbol,
-                StrategySignalRun.stock_market == item.market,
-                StrategySignalRun.strategy_code == strategy_code,
-                StrategySignalRun.source_pool == "screener",
-            )
-            .first()
-        )
-        if row:
-            updated += 1
-        else:
-            row = StrategySignalRun(
-                snapshot_date=snapshot,
-                stock_symbol=item.symbol,
-                stock_market=item.market,
-                strategy_code=strategy_code,
-                source_candidate_id=None,
-            )
-            db.add(row)
-            created += 1
-
-        row.stock_name = item.name or item.symbol
-        row.strategy_name = strategy_name
-        row.strategy_version = "screener-v1"
-        row.risk_level = "medium"
-        row.source_pool = "screener"
-        row.score = score
-        row.rank_score = rank_score
-        row.confidence = round(score / 100.0, 3)
-        row.status = "active"
-        row.action = "buy"
-        row.action_label = "自定义策略建仓"
-        row.signal = "选股公式命中"
-        row.reason = item.reason or "Formula matched on the latest trading day"
-        row.evidence = evidence
-        row.holding_days = 3
-        row.entry_low = round(price * (1 - entry_band_pct), 4)
-        row.entry_high = round(price * (1 + entry_band_pct), 4)
-        row.stop_loss = round(price * (1 - stop_loss_pct), 4)
-        row.target_price = round(price * (1 + target_profit_pct), 4)
-        row.invalidation = "选股条件失效或触发模拟盘止损/止盈"
-        row.plan_quality = 100
-        row.source_agent = "screener"
-        row.source_suggestion_id = None
-        row.trace_id = f"screener-run:{run.id}"
-        row.is_holding_snapshot = False
-        row.context_quality_score = None
-        row.payload = {
-            "source": "screener_strategy",
-            "screener_run_id": run.id,
-            "screener_formula_id": run.formula_id,
-            "formula_snapshot": run.formula_snapshot,
-            "board_code": item.board_code or "",
-            "board_name": item.board_name or "",
-            "indicators": indicators,
-            "change_pct": item.change_pct,
-        }
-        row.updated_at = datetime.now(timezone.utc)
-
-    db.commit()
-    scan_result = None
-    if payload.trigger_scan and (created or updated):
-        scan_result = await ENGINE.scan_once()
-
-    return {
-        "ok": True,
-        "run_id": run.id,
-        "strategy_code": strategy_code,
-        "strategy_name": strategy_name,
-        "created": created,
-        "updated": updated,
-        "skipped": skipped,
-        "scan": scan_result,
-    }
+    scan_result = await ENGINE.scan_once() if payload.trigger_scan else None
+    return {"ok": True, **published, "scan": scan_result}
 
 
 # ---------------------------------------------------------------------------

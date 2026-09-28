@@ -15,7 +15,7 @@ from src.core.screener.formula import FormulaError, FormulaEvaluator, function_c
 from src.core.screener.providers import get_screener_provider, normalize_universe_config
 from src.core.task_manager import TaskHandle, task_manager
 from src.web.database import SessionLocal, get_db
-from src.web.models import StockScreenerFormula, StockScreenerResult, StockScreenerRun
+from src.web.models import StockScreenerFormula, StockScreenerResult, StockScreenerRun, WatchedBoard
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -139,6 +139,10 @@ def _run_screener_job(run_id: int, task: TaskHandle | None = None) -> dict:
         program = parse_formula(run.formula_snapshot)
         provider = get_screener_provider(cfg.get("provider"))
         universe = provider.resolve_universe(db, cfg, limit=int(cfg.get("max_symbols") or 300))
+        board_errors = list(getattr(provider, "board_errors", []))
+        if not universe:
+            detail = f"；板块获取失败：{board_errors[0]}" if board_errors else ""
+            raise RuntimeError(f"股票池为空，请先添加 A 股自选股或关注板块{detail}")
 
         run.total_count = len(universe)
         run.progress_total = len(universe)
@@ -150,16 +154,24 @@ def _run_screener_job(run_id: int, task: TaskHandle | None = None) -> dict:
             task.set_progress(0, len(universe))
 
         matched = 0
+        evaluated_count = 0
+        insufficient_klines = 0
+        evaluation_errors: list[str] = []
         for idx, stock in enumerate(universe, start=1):
             klines = provider.fetch_klines(stock, days=int(cfg.get("days") or 120))
             evaluated: dict[str, Any] = {"matched": False}
-            if len(klines) >= 30:
+            if len(klines) >= 2:
                 try:
                     evaluated = FormulaEvaluator(klines, symbol=stock.symbol).run(program)
+                    evaluated_count += 1
                 except FormulaError as e:
                     logger.debug("formula not evaluable for %s: %s", stock.symbol, e)
+                    evaluation_errors.append(f"{stock.symbol}: {e}")
                 except Exception as e:
                     logger.warning("formula run failed for %s: %s", stock.symbol, e)
+                    evaluation_errors.append(f"{stock.symbol}: {e}")
+            else:
+                insufficient_klines += 1
 
             if evaluated.get("matched"):
                 last_close, change_pct = _latest_change(klines)
@@ -188,13 +200,26 @@ def _run_screener_job(run_id: int, task: TaskHandle | None = None) -> dict:
                 if task:
                     task.set_progress(idx, len(universe))
 
+        if evaluated_count == 0:
+            if evaluation_errors:
+                raise RuntimeError(f"所有候选股票的公式计算失败，首个错误：{evaluation_errors[0]}")
+            raise RuntimeError("所有候选股票的 K 线数据不足 2 根，请检查 K 线数据源")
+
+        warnings: list[str] = []
+        if board_errors:
+            warnings.append(f"{len(board_errors)} 个关注板块成分股获取失败，首个：{board_errors[0]}")
+        if insufficient_klines:
+            warnings.append(f"{insufficient_klines} 只股票的 K 线不足 2 根，未参与筛选")
+        if evaluation_errors:
+            warnings.append(f"{len(evaluation_errors)} 只股票的公式计算失败，首个：{evaluation_errors[0]}")
+
         run.progress_current = len(universe)
         run.progress_total = len(universe)
         run.matched_count = matched
         run.status = "success"
         run.duration_ms = int((time.perf_counter() - started) * 1000)
         run.finished_at = datetime.now(timezone.utc)
-        run.error = ""
+        run.error = "；".join(warnings)
         db.commit()
         return {"run_id": run.id, "total_count": len(universe), "matched_count": matched}
     except Exception as e:
@@ -214,6 +239,27 @@ def _run_screener_job(run_id: int, task: TaskHandle | None = None) -> dict:
 @router.get("/functions")
 def get_functions():
     return function_catalog()
+
+
+@router.get("/universe/boards")
+def list_universe_boards(db: Session = Depends(get_db)):
+    """返回公式选股实际会扫描的已启用板块池。"""
+    rows = (
+        db.query(WatchedBoard)
+        .filter(WatchedBoard.market == "CN", WatchedBoard.enabled == True)  # noqa: E712
+        .order_by(WatchedBoard.sort_order.asc(), WatchedBoard.id.asc())
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "board_code": row.board_code,
+                "board_name": row.board_name,
+                "tier": row.tier,
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get("/formulas")

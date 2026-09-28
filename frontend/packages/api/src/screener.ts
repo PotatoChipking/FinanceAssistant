@@ -54,6 +54,12 @@ export interface ScreenerProviderCatalogItem {
   description: string
 }
 
+export interface ScreenerBoardItem {
+  board_code: string
+  board_name: string
+  tier: 'pool' | 'pinned'
+}
+
 export interface ScreenerFunctionCatalog {
   fields: Array<{ name: string; description: string }>
   functions: Array<{ name: string; description: string }>
@@ -77,6 +83,7 @@ export interface ScreenerRunPayload {
 export const screenerApi = {
   providerCatalog: () =>
     fetchAPI<{ items: ScreenerProviderCatalogItem[] }>('/providers/catalog?type=screener'),
+  listBoards: () => fetchAPI<{ items: ScreenerBoardItem[] }>('/screener/universe/boards'),
   functions: () => fetchAPI<ScreenerFunctionCatalog>('/screener/functions'),
   listFormulas: () => fetchAPI<{ items: ScreenerFormulaItem[] }>('/screener/formulas'),
   createFormula: (payload: ScreenerFormulaPayload) =>

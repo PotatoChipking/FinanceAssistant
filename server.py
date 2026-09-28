@@ -464,6 +464,17 @@ def seed_data_sources():
             "supports_batch": False,
             "test_symbols": ["601127", "600519"],
         },
+        # 板块成分股与热门股票发现数据源（选股工作台依赖）
+        {
+            "name": "东方财富股票发现",
+            "type": "discovery",
+            "provider": "eastmoney",
+            "config": {},
+            "enabled": True,
+            "priority": 0,
+            "supports_batch": False,
+            "test_symbols": ["600519"],
+        },
         # 实时行情数据源
         {
             "name": "腾讯行情",
