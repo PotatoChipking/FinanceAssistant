@@ -247,7 +247,7 @@ def test_intraday_refresh_reads_providers_even_with_cached_bars(monkeypatch: Mon
     client = MagicMock()
     client.__enter__.return_value = client
     client.get.return_value.json.side_effect = [
-        {"data": {"sh600519": {"m1": [["202611101001", 10, 11, 11, 10, 100]]}}},
+        {"data": {"sh600519": {"m1": [["202611101001", "10", "11", "11", "10", "100", {}, "0.04"]]}}},
         {"data": {"klines": ["2026-11-10 10:01,10,11,11,10,100"]}},
     ]
     monkeypatch.setattr(kline_collector.httpx, "Client", lambda **kwargs: client)
@@ -256,6 +256,7 @@ def test_intraday_refresh_reads_providers_even_with_cached_bars(monkeypatch: Mon
     eastmoney = kline_collector._fetch_eastmoney_intraday_klines
     assert tencent("600519", MarketCode.CN, 1) == old
     assert eastmoney("600519", MarketCode.CN, "1min", 1) == old
-    assert tencent("600519", MarketCode.CN, 1, refresh=True)[-1].close == 11
+    [bar] = tencent("600519", MarketCode.CN, 1, refresh=True)
+    assert (bar.close, bar.volume, bar.amount) == (11, 100, None)
     assert eastmoney("600519", MarketCode.CN, "1min", 1, refresh=True)[-1].close == 11
     assert client.get.call_count == 2

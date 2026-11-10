@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from math import isfinite
 
 import httpx
 import time
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 腾讯日K线 API
 TENCENT_KLINE_URL = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-TENCENT_MINUTE_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/kline/mkline"
+TENCENT_MINUTE_KLINE_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
 EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 
@@ -499,7 +500,16 @@ def _parse_tencent_intraday_payload(payload: dict, tencent_sym: str) -> list[Kli
                 high = float(parts[3])
                 low = float(parts[4])
                 volume = max(0.0, float(parts[5]))
-                amount = float(parts[6]) if len(parts) > 6 and parts[6] not in (None, "") else None
+                amount = None
+                if len(parts) > 6:
+                    # 腾讯 mkline 常在成交额的位置返回 {}，OHLC 和成交量仍可用。
+                    try:
+                        raw_amount = float(parts[6])
+                    except (TypeError, ValueError):
+                        pass
+                    else:
+                        if isfinite(raw_amount):
+                            amount = raw_amount
             else:
                 # Tencent minute-query points: time, price, cumulative volume, cumulative amount.
                 close = float(parts[1])

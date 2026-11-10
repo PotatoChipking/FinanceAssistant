@@ -230,7 +230,7 @@ http://172.24.112.1:8897
 可用下面的命令在 WSL 内验证腾讯 A 股分钟 K 线是否能访问：
 
 ```bash
-curl 'https://web.ifzq.gtimg.cn/appstock/app/kline/mkline?param=sh600519,m1,,20'
+curl 'https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=sh600519,m1,,20'
 ```
 
 如果返回内容中包含 `data` 和 `m1`，说明腾讯分钟线可用；如果连接失败或返回空，再检查 WSL 网络和全局代理配置。
