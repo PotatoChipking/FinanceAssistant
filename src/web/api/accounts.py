@@ -359,7 +359,7 @@ def delete_position(position_id: int, db: Session = Depends(get_db)):
 
     db.delete(position)
     db.commit()
-    logger.info(f"删除持仓: {position.account.name} - {position.stock.name}")
+    logger.info("删除持仓 ID=%s", position_id)
     return {"success": True}
 
 
