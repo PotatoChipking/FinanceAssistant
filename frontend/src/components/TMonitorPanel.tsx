@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshCw, Settings2 } from 'lucide-react'
 import { fetchAPI } from '@panwatch/api'
 import { Button } from '@panwatch/base-ui/components/ui/button'
@@ -29,9 +29,17 @@ interface TMonitorState {
     data_quality?: string
     direction?: string
     skip_reason?: string
+    minute_at?: string
     t_scores?: Partial<Record<'long' | 'short', { score: number; detail: Record<string, boolean> }>>
     vwap_gate_pct?: number | null
   }
+}
+
+interface TMonitorScanResult {
+  scanned: number
+  triggered: number
+  skipped?: string
+  results: { position_id: number; symbol?: string; status: string; reason?: string | null }[]
 }
 
 // 做T评分的各加分项:key 对应后端 score_detail,label 按多/空方向区分文案
@@ -72,7 +80,11 @@ const LEG_TITLES: Record<LegAction, string> = {
 
 export default function TMonitorPanel() {
   const [rows, setRows] = useState<TMonitorState[]>([])
+  const [loadError, setLoadError] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [scanResult, setScanResult] = useState<TMonitorScanResult | null>(null)
+  const [scanError, setScanError] = useState('')
+  const loadSequence = useRef({ requested: 0, applied: 0 })
   const [leg, setLeg] = useState<{ row: TMonitorState; action: LegAction } | null>(null)
   const [legPrice, setLegPrice] = useState('')
   const [legQty, setLegQty] = useState('')
@@ -81,23 +93,36 @@ export default function TMonitorPanel() {
   const { toast } = useToast()
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current.requested
     try {
-      setRows(await fetchAPI<TMonitorState[]>('/t-monitor/states'))
+      const latest = await fetchAPI<TMonitorState[]>('/t-monitor/states', { cache: 'no-store' })
+      if (sequence < loadSequence.current.applied) return
+      loadSequence.current.applied = sequence
+      setRows(latest)
+      setLoadError(false)
     } catch {
-      setRows([])
+      if (sequence < loadSequence.current.applied) return
+      loadSequence.current.applied = sequence
+      setLoadError(true)
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    void load()
+    const timer = window.setInterval(load, 10_000)
+    return () => window.clearInterval(timer)
+  }, [load])
 
   const scan = async () => {
     setLoading(true)
+    setScanResult(null)
+    setScanError('')
     try {
-      const result = await fetchAPI<{ scanned: number; triggered: number }>('/t-monitor/scan', { method: 'POST' })
-      toast(`扫描 ${result.scanned} 只持仓，触发 ${result.triggered} 条信号`, 'success')
+      const result = await fetchAPI<TMonitorScanResult>('/t-monitor/scan', { method: 'POST', timeoutMs: 90_000 })
+      setScanResult(result)
       await load()
     } catch (error) {
-      toast(error instanceof Error ? error.message : '扫描失败', 'error')
+      setScanError(error instanceof Error ? error.message : '扫描失败')
     } finally {
       setLoading(false)
     }
@@ -178,6 +203,8 @@ export default function TMonitorPanel() {
     }
   }
 
+  const scanIssues = scanResult?.results.filter(row => row.status === 'skipped' || row.status === 'error') ?? []
+
   return (
     <div className="card p-4 mb-4">
       <div className="flex items-center justify-between gap-3 mb-3">
@@ -190,12 +217,26 @@ export default function TMonitorPanel() {
             <Settings2 className="w-3.5 h-3.5 mr-1.5" />参数
           </Button>
           <Button size="sm" variant="outline" onClick={scan} disabled={loading}>
-            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${loading ? 'animate-spin' : ''}`} />立即扫描
+            <RefreshCw className={`w-3.5 h-3.5 mr-1.5 ${loading ? 'animate-spin' : ''}`} />{loading ? '扫描中…' : '立即扫描'}
           </Button>
         </div>
       </div>
+      {loadError && <p role="status" className="mb-3 text-[11px] text-amber-600">读取扫描结果失败，稍后自动重试</p>}
+      {scanError && <p role="status" className="mb-3 text-[11px] text-rose-600">手动扫描失败 · {scanError}</p>}
+      {scanResult && (
+        <div role="status" className="mb-3 text-[11px] text-muted-foreground">
+          {scanResult.skipped === 'strategy_disabled' ? '做 T 策略已停用' : scanResult.scanned === 0
+            ? '没有符合条件的 A 股持仓'
+            : `扫描 ${scanResult.scanned} 只持仓，触发 ${scanResult.triggered} 条信号`}
+          {scanIssues.map(row => (
+            <div key={row.position_id} className="text-amber-600">
+              {row.symbol ?? `持仓 ${row.position_id}`} · {row.status === 'error' ? '扫描出错' : row.reason || '已跳过'}
+            </div>
+          ))}
+        </div>
+      )}
       {rows.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/60 py-5 text-center text-[12px] text-muted-foreground">尚无今日扫描结果</div>
+        <div className="rounded-lg border border-dashed border-border/60 py-5 text-center text-[12px] text-muted-foreground">尚无扫描结果</div>
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-2.5">
           {rows.map(row => {
@@ -203,7 +244,12 @@ export default function TMonitorPanel() {
             return (
             <div key={row.id} className="rounded-lg border border-border/50 bg-background/30 p-3">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-[13px] font-medium">{row.stock_name} <span className="font-mono text-muted-foreground">{row.stock_symbol}</span></div>
+                <div>
+                  <div className="text-[13px] font-medium">{row.stock_name} <span className="font-mono text-muted-foreground">{row.stock_symbol}</span></div>
+                  <div className="text-[10px] text-muted-foreground">
+                    {row.context?.minute_at ? `分钟行情 ${row.context.minute_at}` : `行情日期 ${row.trade_date}`}
+                  </div>
+                </div>
                 <div className="flex items-center gap-1.5">
                   {row.state !== 'idle' && (
                     <Badge variant="outline" className={short ? 'text-emerald-600 border-emerald-500/40' : 'text-rose-600 border-rose-500/40'}>

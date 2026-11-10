@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ from src.web.models import (
 )
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -161,8 +163,9 @@ class TMonitorEngine:
             asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=320, interval="1min", cache_ttl_sec=5),
         )
         if not minute:
-            return {"position_id": position.id, "status": "skipped", "reason": "腾讯分钟K为空"}
-        trade_date = (_row_time(minute[-1])[:10] or _now().strftime("%Y-%m-%d"))
+            return {"position_id": position.id, "status": "skipped", "reason": "分钟 K 线不可用"}
+        minute_at = _row_time(minute[-1])
+        trade_date = minute_at[:10] or _now().strftime("%Y-%m-%d")
         state = (
             db.query(TMonitorState)
             .filter(TMonitorState.position_id == position.id, TMonitorState.trade_date == trade_date)
@@ -178,6 +181,7 @@ class TMonitorEngine:
         # 失效/完成冷却中),若不在此统一更新,这些持仓的现价会一直冻结在上次入场时的价。
         if current > 0:
             state.current_price = current
+        state.context = {**(state.context or {}), "minute_at": minute_at}
         thresholds = dict(
             min_score=int(params.get("min_score", 70)),
             min_vwap_deviation_pct=float(params.get("min_vwap_deviation_pct", 0.003)),
@@ -370,9 +374,8 @@ class TMonitorEngine:
         if not candidates:
             if display_signal is not None:
                 state.score = display_signal.score
-                state.current_price = display_signal.current_price
                 state.vwap = display_signal.vwap
-                context = {**display_signal.to_dict(), "position_ratio": position_ratio}
+                context = {**display_signal.to_dict(), "position_ratio": position_ratio, "minute_at": minute_at}
                 context["t_scores"] = t_scores
                 context["vwap_gate_pct"] = display_signal.metrics.get("vwap_gate_pct")
                 if skip_reason:
@@ -388,6 +391,7 @@ class TMonitorEngine:
         context = signal.to_dict()
         context["position_ratio"] = position_ratio
         context["direction"] = side
+        context["minute_at"] = minute_at
         context["t_scores"] = t_scores
         context["vwap_gate_pct"] = signal.metrics.get("vwap_gate_pct")
         state.score = signal.score
@@ -429,12 +433,15 @@ class TMonitorEngine:
                 query = query.filter(Position.id == position_id)
             results = []
             for position, stock, account in query.all():
+                scanned_position_id, symbol = position.id, stock.symbol
                 try:
-                    results.append(await self._scan_position(db, position, stock, account, params))
+                    result = await self._scan_position(db, position, stock, account, params)
                     db.commit()
                 except Exception as exc:
                     db.rollback()
-                    results.append({"position_id": position.id, "status": "error", "reason": str(exc)})
+                    logger.warning("[做T盯盘] %s 扫描失败", symbol, exc_info=True)
+                    result = {"position_id": scanned_position_id, "status": "error", "reason": str(exc)}
+                results.append({**result, "symbol": symbol})
             triggered = sum(item.get("status") in {"buy_t", "sell_t", "sell_open", "buy_back", "invalidated"} for item in results)
             return {"scanned": len(results), "triggered": triggered, "results": results}
         finally:
@@ -505,7 +512,14 @@ class TMonitorEngine:
             state.stop_loss_price = stop
             state.target_price = target
             state.signal_expires_at = None
-            state.context = {**sig.to_dict(), "direction": side, "manual": True, "stop_loss_price": stop, "target_price": target}
+            state.context = {
+                **sig.to_dict(),
+                "direction": side,
+                "manual": True,
+                "stop_loss_price": stop,
+                "target_price": target,
+                "minute_at": _row_time(minute[-1]),
+            }
             db.commit()
             return {"success": True, "state": state.state}
         except Exception as exc:
