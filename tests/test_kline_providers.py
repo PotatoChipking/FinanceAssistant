@@ -1,9 +1,15 @@
+from unittest.mock import MagicMock
+
+from pytest import MonkeyPatch
+
+from src.collectors import kline_collector
 from src.collectors.kline_collector import (
     KlineData,
     _parse_tencent_intraday_payload,
     aggregate_intraday_klines,
 )
 from src.core.providers.base import ProviderRequest
+from src.core.providers.cache import TTLCache
 from src.core.providers.kline import eastmoney as eastmoney_module
 from src.core.providers.kline import stooq as stooq_module
 from src.core.providers.kline import tencent as tencent_module
@@ -61,8 +67,8 @@ def test_eastmoney_provider_fetches_daily(monkeypatch):
 def test_eastmoney_provider_fetches_intraday(monkeypatch):
     calls = []
 
-    def fake_intraday(symbol, market, interval, limit):
-        calls.append((symbol, market, interval, limit))
+    def fake_intraday(symbol: str, market: MarketCode, interval: str, limit: int, *, refresh: bool) -> list[KlineData]:
+        calls.append((symbol, market, interval, limit, refresh))
         return [
             KlineData(
                 date="2026-06-12 09:31",
@@ -85,13 +91,14 @@ def test_eastmoney_provider_fetches_intraday(monkeypatch):
                 symbols=("600519",),
                 market="CN",
                 extra=(("days", 241), ("interval", "1min")),
+                refresh=True,
             )
         )
     )
 
     assert resp.success
     assert resp.data[0].date == "2026-06-12 09:31"
-    assert calls == [("600519", MarketCode.CN, "1min", 241)]
+    assert calls == [("600519", MarketCode.CN, "1min", 241, True)]
 
 
 def test_eastmoney_intraday_parses_amount(monkeypatch):
@@ -205,8 +212,8 @@ def test_tencent_provider_serves_five_minute_from_one_minute(monkeypatch):
         KlineData(date="2026-06-22 09:35", open=10.1, close=10.4, high=10.5, low=10.0, volume=120),
     ]
 
-    def fake_intraday(symbol, market, limit):
-        calls.append((symbol, market, limit))
+    def fake_intraday(symbol: str, market: MarketCode, limit: int, *, refresh: bool) -> list[KlineData]:
+        calls.append((symbol, market, limit, refresh))
         return rows
 
     monkeypatch.setattr(tencent_module, "_fetch_tencent_intraday_klines", fake_intraday)
@@ -218,10 +225,37 @@ def test_tencent_provider_serves_five_minute_from_one_minute(monkeypatch):
                 symbols=("600519",),
                 market="CN",
                 extra=(("days", 240), ("interval", "5min")),
+                refresh=True,
             )
         )
     )
 
     assert resp.success
     assert [bar.date for bar in resp.data] == ["2026-06-22 09:35"]
-    assert calls == [("600519", MarketCode.CN, 320)]
+    assert calls == [("600519", MarketCode.CN, 320, True)]
+
+
+def test_intraday_refresh_reads_providers_even_with_cached_bars(monkeypatch: MonkeyPatch) -> None:
+    old = [KlineData("2026-11-10 10:00", 10, 10, 10, 10, 100)]
+    tencent_cache = TTLCache(default_ttl_sec=60)
+    tencent_cache.set("CN:600519:m1:1", old)
+    eastmoney_cache = TTLCache(default_ttl_sec=60)
+    eastmoney_cache.set("CN:600519:1", (1, old))
+    monkeypatch.setattr(kline_collector, "_TENCENT_INTRADAY_CACHE", tencent_cache)
+    monkeypatch.setattr(kline_collector, "_EASTMONEY_INTRADAY_CACHE", eastmoney_cache)
+
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.get.return_value.json.side_effect = [
+        {"data": {"sh600519": {"m1": [["202611101001", 10, 11, 11, 10, 100]]}}},
+        {"data": {"klines": ["2026-11-10 10:01,10,11,11,10,100"]}},
+    ]
+    monkeypatch.setattr(kline_collector.httpx, "Client", lambda **kwargs: client)
+
+    tencent = kline_collector._fetch_tencent_intraday_klines
+    eastmoney = kline_collector._fetch_eastmoney_intraday_klines
+    assert tencent("600519", MarketCode.CN, 1) == old
+    assert eastmoney("600519", MarketCode.CN, "1min", 1) == old
+    assert tencent("600519", MarketCode.CN, 1, refresh=True)[-1].close == 11
+    assert eastmoney("600519", MarketCode.CN, "1min", 1, refresh=True)[-1].close == 11
+    assert client.get.call_count == 2

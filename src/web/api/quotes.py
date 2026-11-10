@@ -14,6 +14,7 @@ class QuoteItem(BaseModel):
 
 class QuoteBatchRequest(BaseModel):
     items: list[QuoteItem]
+    refresh: bool = False
 
 
 def _parse_market(market: str) -> MarketCode:
@@ -107,7 +108,7 @@ async def get_quotes_batch(payload: QuoteBatchRequest):
     providers_by_market: dict[MarketCode, str] = {}
     for market_code, symbols in market_items.items():
         resp = await orch.fetch(
-            ProviderRequest(symbols=tuple(symbols), market=market_code.value)
+            ProviderRequest(symbols=tuple(symbols), market=market_code.value, refresh=payload.refresh)
         )
         if resp.success and resp.data:
             quotes_by_market[market_code] = {item.get("symbol"): item for item in resp.data}

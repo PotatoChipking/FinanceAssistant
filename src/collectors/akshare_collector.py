@@ -103,10 +103,19 @@ def _parse_tencent_line(line: str) -> dict | None:
             circulating_market_value = _to_float(parts[44])
             total_market_value = _to_float(parts[45])
 
+        quote_time = parts[30].strip()
+        data_as_of = None
+        if len(quote_time) == 14 and quote_time.isascii() and quote_time.isdigit():
+            data_as_of = (
+                f"{quote_time[:4]}-{quote_time[4:6]}-{quote_time[6:8]} "
+                f"{quote_time[8:10]}:{quote_time[10:12]}:{quote_time[12:]}"
+            )
+
         return {
             "name": parts[1],
             "symbol": symbol,
             "current_price": float(parts[3] or 0),
+            "data_as_of": data_as_of,
             "prev_close": float(parts[4] or 0),
             "open_price": float(parts[5] or 0),
             "volume": float(parts[6] or 0),

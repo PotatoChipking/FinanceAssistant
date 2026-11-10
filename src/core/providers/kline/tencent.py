@@ -64,6 +64,7 @@ class TencentKlineProvider(KlineProvider):
                     symbol,
                     market_code,
                     max(days, 320),
+                    refresh=req.refresh,
                 )
                 klines = aggregate_intraday_klines(one_minute, 5) if interval in {"5min", "5minute", "5m", "5"} else one_minute
                 if not klines:

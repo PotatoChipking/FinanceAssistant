@@ -42,6 +42,16 @@ interface TMonitorScanResult {
   results: { position_id: number; symbol?: string; status: string; reason?: string | null }[]
 }
 
+interface TMonitorQuote {
+  current_price: number | null
+  data_as_of: string | null
+}
+
+interface TMonitorPanelProps {
+  quotes: Record<string, TMonitorQuote>
+  onRefreshQuotes: () => Promise<boolean>
+}
+
 // 做T评分的各加分项:key 对应后端 score_detail,label 按多/空方向区分文案
 const SCORE_CHECKS: { key: string; weight: number; label: (short: boolean) => string; hint: (short: boolean) => string }[] = [
   { key: 'trend', weight: 20, label: () => '趋势', hint: s => s ? '日线未单边强势上涨,适合高抛' : '日线趋势未破且 MA20 未明显向下' },
@@ -78,12 +88,13 @@ const LEG_TITLES: Record<LegAction, string> = {
   short_close: '确认买回平仓',
 }
 
-export default function TMonitorPanel() {
+export default function TMonitorPanel({ quotes, onRefreshQuotes }: TMonitorPanelProps) {
   const [rows, setRows] = useState<TMonitorState[]>([])
   const [loadError, setLoadError] = useState(false)
   const [loading, setLoading] = useState(false)
   const [scanResult, setScanResult] = useState<TMonitorScanResult | null>(null)
   const [scanError, setScanError] = useState('')
+  const [quoteRefreshFailed, setQuoteRefreshFailed] = useState(false)
   const loadSequence = useRef({ requested: 0, applied: 0 })
   const [leg, setLeg] = useState<{ row: TMonitorState; action: LegAction } | null>(null)
   const [legPrice, setLegPrice] = useState('')
@@ -117,6 +128,11 @@ export default function TMonitorPanel() {
     setLoading(true)
     setScanResult(null)
     setScanError('')
+    setQuoteRefreshFailed(false)
+    const quoteRefresh = onRefreshQuotes().then(
+      success => setQuoteRefreshFailed(!success),
+      () => setQuoteRefreshFailed(true),
+    )
     try {
       const result = await fetchAPI<TMonitorScanResult>('/t-monitor/scan', { method: 'POST', timeoutMs: 90_000 })
       setScanResult(result)
@@ -124,13 +140,22 @@ export default function TMonitorPanel() {
     } catch (error) {
       setScanError(error instanceof Error ? error.message : '扫描失败')
     } finally {
+      await quoteRefresh
       setLoading(false)
     }
   }
 
+  const latestQuote = (row: TMonitorState) => {
+    const quote = quotes[`CN:${row.stock_symbol}`]
+    const minuteAt = row.context?.minute_at || row.trade_date
+    if (quote?.current_price == null || (quote.data_as_of && quote.data_as_of < minuteAt)) return null
+    return quote
+  }
+
   const openLeg = (row: TMonitorState, action: LegAction) => {
     setLeg({ row, action })
-    setLegPrice(row.current_price != null ? String(row.current_price) : '')
+    const currentPrice = latestQuote(row)?.current_price ?? row.current_price
+    setLegPrice(currentPrice != null ? String(currentPrice) : '')
     setLegQty(row.recommended_quantity ? String(row.recommended_quantity) : '')
   }
 
@@ -222,6 +247,7 @@ export default function TMonitorPanel() {
         </div>
       </div>
       {loadError && <p role="status" className="mb-3 text-[11px] text-amber-600">读取扫描结果失败，稍后自动重试</p>}
+      {quoteRefreshFailed && <p role="status" className="mb-3 text-[11px] text-amber-600">实时报价刷新失败</p>}
       {scanError && <p role="status" className="mb-3 text-[11px] text-rose-600">手动扫描失败 · {scanError}</p>}
       {scanResult && (
         <div role="status" className="mb-3 text-[11px] text-muted-foreground">
@@ -241,12 +267,14 @@ export default function TMonitorPanel() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-2.5">
           {rows.map(row => {
             const short = isShortRow(row)
+            const quote = latestQuote(row)
             return (
             <div key={row.id} className="rounded-lg border border-border/50 bg-background/30 p-3">
               <div className="flex items-center justify-between gap-2">
                 <div>
                   <div className="text-[13px] font-medium">{row.stock_name} <span className="font-mono text-muted-foreground">{row.stock_symbol}</span></div>
-                  <div className="text-[10px] text-muted-foreground">
+                  {quote && <div className="text-[10px] text-muted-foreground">{quote.data_as_of ? `报价 ${quote.data_as_of}` : '报价时间未知'}</div>}
+                  <div className="text-[10px] text-muted-foreground" title="VWAP 和评分所用的最后一根分钟 K 线">
                     {row.context?.minute_at ? `分钟行情 ${row.context.minute_at}` : `行情日期 ${row.trade_date}`}
                   </div>
                 </div>
@@ -266,7 +294,7 @@ export default function TMonitorPanel() {
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 mt-3">
                 {[
-                  { label: '现价', value: price(row.current_price), cls: 'text-foreground' },
+                  { label: quote ? '现价' : '分钟收盘价', value: price(quote?.current_price ?? row.current_price), cls: 'text-foreground' },
                   {
                     // 标签显示 当前偏离/得分门槛,如 "VWAP -0.42/±0.80%":偏离超过 ±门槛 才拿 VWAP 分
                     label: row.current_price != null && row.vwap != null && row.vwap > 0

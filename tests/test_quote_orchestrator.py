@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -185,6 +186,11 @@ class TestOrchestratorCache(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(resp1.success)
         self.assertTrue(resp2.success)
         self.assertEqual(a.call_count, 1, "缓存命中应只调用 1 次")
+
+        refreshed = await orch.fetch(replace(req, refresh=True))
+        self.assertIsNot(refreshed, resp1)
+        self.assertIs(await orch.fetch(req), refreshed)
+        self.assertEqual(a.call_count, 2)
 
     async def test_cache_ttl_zero_skips_write(self):
         """cache_ttl_sec=0 — 不写缓存,下次仍打 provider"""

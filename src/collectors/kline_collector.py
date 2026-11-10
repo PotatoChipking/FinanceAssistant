@@ -209,7 +209,7 @@ def _fetch_eastmoney_klines(
 
 
 def _fetch_eastmoney_intraday_klines(
-    symbol: str, market: MarketCode, interval: str, limit: int
+    symbol: str, market: MarketCode, interval: str, limit: int, *, refresh: bool = False
 ) -> list["KlineData"]:
     """Fetch 1-minute or 5-minute klines from Eastmoney for CN/HK symbols."""
 
@@ -222,7 +222,7 @@ def _fetch_eastmoney_intraday_klines(
     klt = "5" if str(interval).lower() in ("5", "5min", "5m") else "1"
     need_limit = min(max(1, int(limit or 1)), 1200)
     cache_key = f"{market.value}:{sym}:{klt}"
-    cached = _EASTMONEY_INTRADAY_CACHE.get(cache_key)
+    cached = None if refresh else _EASTMONEY_INTRADAY_CACHE.get(cache_key)
     stale = cached[1] if cached else []
     if cached and cached[0] >= need_limit:
         bars = cached[1]
@@ -543,6 +543,8 @@ def _fetch_tencent_intraday_klines(
     symbol: str,
     market: MarketCode,
     limit: int = 320,
+    *,
+    refresh: bool = False,
 ) -> list[KlineData]:
     """Fetch Tencent one-minute K-lines without Eastmoney fallback."""
 
@@ -551,7 +553,7 @@ def _fetch_tencent_intraday_klines(
     tencent_sym = _tencent_symbol(symbol, market)
     safe_limit = min(max(1, int(limit or 320)), 1200)
     cache_key = f"{market.value}:{symbol}:m1:{safe_limit}"
-    cached = _TENCENT_INTRADAY_CACHE.get(cache_key)
+    cached = None if refresh else _TENCENT_INTRADAY_CACHE.get(cache_key)
     if cached:
         return cached
 

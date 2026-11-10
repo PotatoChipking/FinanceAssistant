@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.core.http import run_sync
 from src.core.providers import ProviderRequest, ProviderResponse, get_kline_orchestrator
+from src.core.providers.base import is_intraday_interval
 from src.models.market import MarketCode
 
 
@@ -23,6 +24,7 @@ def fetch_kline_response_sync(
     days: int = 60,
     interval: str = "1d",
     cache_ttl_sec: float | None = None,
+    refresh_intraday: bool = False,
 ) -> ProviderResponse:
     normalized_interval = str(interval or "1d")
     ttl = cache_ttl_sec
@@ -32,6 +34,7 @@ def fetch_kline_response_sync(
         symbols=(symbol,),
         market=_market_value(market),
         extra=(("days", int(days or 60)), ("interval", normalized_interval)),
+        refresh=refresh_intraday and is_intraday_interval(normalized_interval),
     )
     return _fetch_response_sync(req, ttl)
 
@@ -43,6 +46,7 @@ def fetch_klines_sync(
     days: int = 60,
     interval: str = "1d",
     cache_ttl_sec: float | None = None,
+    refresh_intraday: bool = False,
 ) -> list:
     resp = fetch_kline_response_sync(
         symbol,
@@ -50,6 +54,7 @@ def fetch_klines_sync(
         days=days,
         interval=interval,
         cache_ttl_sec=cache_ttl_sec,
+        refresh_intraday=refresh_intraday,
     )
     if not resp.success:
         return []

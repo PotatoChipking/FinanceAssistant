@@ -220,13 +220,13 @@ class Orchestrator:
         - cache_ttl_sec=0 跳过缓存写入(读取仍尝试,避免重复落库)
         """
         cache_key = req.cache_key(self.source_type)
-        cached = self._cache.get(cache_key)
+        cached = None if req.refresh else self._cache.get(cache_key)
         if cached is not None:
             return cached  # 缓存命中,直接返回
 
         lock = self._singleflight_lock(cache_key)
         async with lock:
-            cached = self._cache.get(cache_key)
+            cached = None if req.refresh else self._cache.get(cache_key)
             if cached is not None:
                 return cached
 

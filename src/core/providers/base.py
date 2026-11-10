@@ -20,6 +20,7 @@ class ProviderRequest:
     timeframe: str = "day"
     since_hours: int = 12
     extra: tuple[tuple[str, Any], ...] = ()  # 排序后的 kv tuple,保证可哈希
+    refresh: bool = False  # 报价和分时请求跳过缓存读取，新结果仍写入原缓存键
 
     def cache_key(self, type_: str) -> str:
         """生成稳定的缓存键。"""

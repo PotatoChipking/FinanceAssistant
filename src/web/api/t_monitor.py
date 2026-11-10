@@ -138,7 +138,7 @@ def list_events(position_id: int | None = None, limit: int = 50, db: Session = D
 
 @router.post("/scan")
 async def scan(position_id: int | None = None) -> dict:
-    return await ENGINE.scan_once(position_id=position_id, bypass_market_hours=True)
+    return await ENGINE.scan_once(position_id=position_id, bypass_market_hours=True, refresh_intraday=True)
 
 
 @router.post("/states/{state_id}/manual")

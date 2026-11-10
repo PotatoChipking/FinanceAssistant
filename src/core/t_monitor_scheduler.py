@@ -28,7 +28,7 @@ class TMonitorScheduler:
             self._running = False
 
     async def trigger_once(self, *, position_id: int | None = None) -> dict:
-        return await ENGINE.scan_once(position_id=position_id, bypass_market_hours=True)
+        return await ENGINE.scan_once(position_id=position_id, bypass_market_hours=True, refresh_intraday=True)
 
     def start(self) -> None:
         self.scheduler.add_job(self._scan_job, "interval", seconds=self.interval_seconds, id="t_monitor_scan", replace_existing=True, coalesce=True, max_instances=1)

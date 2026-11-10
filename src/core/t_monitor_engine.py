@@ -15,9 +15,11 @@ from src.core.notifier import NotifierManager
 from src.core.signals.base_position_vwap_t import (
     _atr,
     _exclude_today,
+    _latest_day_minutes,
     cn_price_limit_ratio,
     compute_base_position_vwap_t,
     compute_base_position_vwap_t_short,
+    compute_intraday_vwap,
     evaluate_t_exit,
     evaluate_t_exit_short,
 )
@@ -157,10 +159,15 @@ class TMonitorEngine:
         stock: Stock,
         account: Account,
         params: dict[str, Any],
+        *,
+        refresh_intraday: bool = False,
     ) -> dict[str, Any]:
         daily, minute = await asyncio.gather(
             asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=120, interval="1d", cache_ttl_sec=60),
-            asyncio.to_thread(fetch_klines_sync, stock.symbol, "CN", days=320, interval="1min", cache_ttl_sec=5),
+            asyncio.to_thread(
+                fetch_klines_sync, stock.symbol, "CN", days=320, interval="1min",
+                cache_ttl_sec=5, refresh_intraday=refresh_intraday,
+            ),
         )
         if not minute:
             return {"position_id": position.id, "status": "skipped", "reason": "分钟 K 线不可用"}
@@ -168,10 +175,15 @@ class TMonitorEngine:
         trade_date = minute_at[:10] or _now().strftime("%Y-%m-%d")
         state = (
             db.query(TMonitorState)
-            .filter(TMonitorState.position_id == position.id, TMonitorState.trade_date == trade_date)
+            .filter(TMonitorState.position_id == position.id)
+            .order_by(TMonitorState.trade_date.desc())
             .first()
         )
-        if state is None:
+        if state is not None:
+            previous_minute = (state.context or {}).get("minute_at") or ""
+            if (state.trade_date, previous_minute) > (trade_date, minute_at):
+                return {"position_id": position.id, "status": "skipped", "reason": "分钟行情早于已保存的结果"}
+        if state is None or state.trade_date != trade_date:
             state = TMonitorState(position_id=position.id, trade_date=trade_date, state="idle")
             db.add(state)
             db.flush()
@@ -219,10 +231,12 @@ class TMonitorEngine:
         _disp_sig = _long_sig
         if _short_sig is not None and (_disp_sig is None or _short_sig.score > _disp_sig.score):
             _disp_sig = _short_sig
+        vwap = _disp_sig.vwap if _disp_sig is not None else None
+        if vwap is None:
+            vwap, _ = compute_intraday_vwap(_latest_day_minutes(minute)[-320:])
+        state.vwap = vwap
         if _disp_sig is not None:
             state.score = _disp_sig.score
-            if _disp_sig.vwap:
-                state.vwap = _disp_sig.vwap
             state.context = {
                 **(state.context or {}),
                 "t_scores": t_scores,
@@ -374,7 +388,6 @@ class TMonitorEngine:
         if not candidates:
             if display_signal is not None:
                 state.score = display_signal.score
-                state.vwap = display_signal.vwap
                 context = {**display_signal.to_dict(), "position_ratio": position_ratio, "minute_at": minute_at}
                 context["t_scores"] = t_scores
                 context["vwap_gate_pct"] = display_signal.metrics.get("vwap_gate_pct")
@@ -414,6 +427,7 @@ class TMonitorEngine:
         *,
         position_id: int | None = None,
         bypass_market_hours: bool = False,
+        refresh_intraday: bool = False,
     ) -> dict[str, Any]:
         if not bypass_market_hours and not MARKETS[MarketCode.CN].is_trading_time():
             return {"scanned": 0, "triggered": 0, "skipped": "outside_trading_hours", "results": []}
@@ -435,7 +449,9 @@ class TMonitorEngine:
             for position, stock, account in query.all():
                 scanned_position_id, symbol = position.id, stock.symbol
                 try:
-                    result = await self._scan_position(db, position, stock, account, params)
+                    result = await self._scan_position(
+                        db, position, stock, account, params, refresh_intraday=refresh_intraday,
+                    )
                     db.commit()
                 except Exception as exc:
                     db.rollback()

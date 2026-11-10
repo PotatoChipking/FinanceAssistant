@@ -52,6 +52,7 @@ class EastmoneyKlineProvider(KlineProvider):
                     market,
                     interval,
                     max(1, days),
+                    refresh=req.refresh,
                 )
             else:
                 data = await asyncio.to_thread(

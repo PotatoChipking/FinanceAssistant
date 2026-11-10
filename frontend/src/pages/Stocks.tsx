@@ -141,7 +141,10 @@ interface QuoteResponse {
   market: string
   current_price: number | null
   change_pct: number | null
+  data_as_of: string | null
 }
+
+type QuoteSnapshot = Pick<QuoteResponse, 'current_price' | 'change_pct' | 'data_as_of'>
 
 interface StockForm {
   symbol: string
@@ -352,7 +355,9 @@ export default function StocksPage() {
   const [showReviewDialog, setShowReviewDialog] = useState(false)
 
   // Quotes for all stocks (used in stock list)
-  const [quotes, setQuotes] = useState<Record<string, { current_price: number | null; change_pct: number | null }>>({})
+  const [quotes, setQuotes] = useState<Record<string, QuoteSnapshot>>({})
+  const quoteRequestSequence = useRef(0)
+  const forcedQuoteRequest = useRef<Promise<boolean> | null>(null)
   const [quotesLoading, setQuotesLoading] = useState(false)
   // Keyed by `${market}:${symbol}` to avoid cross-market symbol collisions
   const [klineSummaries, setKlineSummaries] = useState<Record<string, KlineSummary>>({})
@@ -635,30 +640,43 @@ export default function StocksPage() {
     return items
   }, [stocks, portfolioRaw])
 
-  const refreshQuotes = useCallback(async () => {
+  const refreshQuotes = useCallback((forceRefresh = false): Promise<boolean> => {
+    if (forcedQuoteRequest.current) return forcedQuoteRequest.current
     const items = buildQuoteItems()
-    if (items.length === 0) return
+    if (items.length === 0) return Promise.resolve(true)
 
-    setQuotesLoading(true)
-    try {
-      const data = await fetchAPI<QuoteResponse[]>('/quotes/batch', {
-        method: 'POST',
-        body: JSON.stringify({ items }),
-      })
-      const map: Record<string, { current_price: number | null; change_pct: number | null }> = {}
-      for (const item of data) {
-        map[`${item.market}:${item.symbol}`] = {
-          current_price: item.current_price ?? null,
-          change_pct: item.change_pct ?? null,
+    const sequence = ++quoteRequestSequence.current
+    const request = async () => {
+      setQuotesLoading(true)
+      try {
+        const data = await fetchAPI<QuoteResponse[]>('/quotes/batch', {
+          method: 'POST',
+          body: JSON.stringify({ items, refresh: forceRefresh }),
+        })
+        if (sequence !== quoteRequestSequence.current) return true
+
+        const map: Record<string, QuoteSnapshot> = {}
+        for (const item of data) {
+          map[`${item.market}:${item.symbol}`] = {
+            current_price: item.current_price ?? null,
+            change_pct: item.change_pct ?? null,
+            data_as_of: item.data_as_of ?? null,
+          }
         }
+        setQuotes(map)
+        setLastRefreshTime(new Date())
+        return true
+      } catch (e) {
+        console.warn('刷新行情失败:', e)
+        return false
+      } finally {
+        if (sequence === quoteRequestSequence.current) setQuotesLoading(false)
       }
-      setQuotes(map)
-      setLastRefreshTime(new Date())
-    } catch (e) {
-      console.warn('刷新行情失败:', e)
-    } finally {
-      setQuotesLoading(false)
     }
+    if (!forceRefresh) return request()
+
+    forcedQuoteRequest.current = request().finally(() => { forcedQuoteRequest.current = null })
+    return forcedQuoteRequest.current
   }, [buildQuoteItems])
 
   useEffect(() => {
@@ -1844,7 +1862,7 @@ export default function StocksPage() {
 
       {/* Accounts & Positions */}
       {viewTab === 'positions' && (
-        <TMonitorPanel />
+        <TMonitorPanel quotes={quotes} onRefreshQuotes={() => refreshQuotes(true)} />
       )}
       {viewTab === 'positions' && (
         portfolio && portfolio.accounts.length === 0 ? (
