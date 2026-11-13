@@ -26,6 +26,73 @@ import { Onboarding } from '@panwatch/biz-ui/components/onboarding'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@panwatch/base-ui/components/ui/dialog'
 import StockInsightModal from '@panwatch/biz-ui/components/stock-insight-modal'
 
+const boardColors = ['#6366f1', '#ef476f', '#16a085', '#f59e0b', '#0ea5e9', '#a855f7', '#d97706', '#db2777', '#14b8a6', '#64748b', '#84cc16', '#9333ea']
+
+function BoardComparison({ boards }: { boards: HotBoardItem[] }) {
+  const [series, setSeries] = useState<Record<string, Awaited<ReturnType<typeof discoveryApi.boardTrend>>>>({})
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const [loading, setLoading] = useState(true)
+  const codes = boards.map(board => board.code).join(',')
+  useEffect(() => {
+    let cancelled = false
+    let pending = false
+    setSeries({})
+    setLoading(true)
+    const refresh = async () => {
+      if (pending) return
+      pending = true
+      const entries = await Promise.all(codes.split(',').map(async code => {
+        try { return [code, await discoveryApi.boardTrend(code)] as const }
+        catch { return [code, { points: [], change_pct: null }] as const }
+      }))
+      if (!cancelled) { setSeries(Object.fromEntries(entries)); setLoading(false) }
+      pending = false
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 60_000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [codes])
+  const lines = boards.map((board, index) => {
+    const data = series[board.code]
+    const baseline = data?.prev_close
+    const points = baseline && baseline > 0 ? data.points.flatMap(point => {
+      const [hour, minute] = point.date.slice(11, 16).split(':').map(Number)
+      const time = hour * 60 + minute
+      if (!((time >= 570 && time <= 690) || (time >= 780 && time <= 900))) return []
+      const elapsed = time <= 690 ? time - 570 : time - 780 + 120
+      return [{ x: 54 + elapsed / 240 * 690, pct: (point.close / baseline - 1) * 100, date: point.date }]
+    }) : []
+    return { ...board, color: boardColors[index % boardColors.length], points }
+  })
+  const visible = lines.filter(line => !hidden.has(line.code) && line.points.length)
+  const values = visible.flatMap(line => line.points.map(point => point.pct))
+  const min = Math.min(-0.5, ...values), max = Math.max(0.5, ...values)
+  const padding = (max - min) * 0.1
+  const low = min - padding, high = max + padding
+  const y = (pct: number) => 230 - (pct - low) / (high - low) * 200
+  return <div className="mb-4 rounded-xl bg-accent/20 p-3">
+    <div className="text-sm font-medium mb-1">板块当日走势对比</div>
+    <div className="text-[11px] text-muted-foreground mb-3">相对昨收涨跌幅 · 点击图例显示或隐藏 · 每分钟刷新</div>
+    <div className="flex flex-wrap gap-2 mb-3">{lines.map(line => <button key={line.code}
+      className={`text-[11px] rounded px-2 py-1 bg-background ${hidden.has(line.code) ? 'opacity-40' : ''}`}
+      aria-pressed={!hidden.has(line.code)}
+      onClick={() => setHidden(previous => { const next = new Set(previous); if (next.has(line.code)) next.delete(line.code); else next.add(line.code); return next })}>
+      <span style={{ color: line.color }}>● </span>{line.name}{!loading && !line.points.length ? ' · 暂无数据' : ''}
+    </button>)}</div>
+    {loading ? <div className="py-12 text-center text-muted-foreground">分时走势加载中…</div> : <>
+      <svg viewBox="0 0 770 270" className="w-full" role="img" aria-label="各板块当日涨跌幅对比图">
+        {[low, (low + high) / 2, high, 0].map((tick, index) => <g key={index}>
+          <line x1="54" x2="744" y1={y(tick)} y2={y(tick)} stroke="currentColor" opacity={tick === 0 ? 0.35 : 0.1} strokeDasharray={tick === 0 ? '4 4' : undefined} />
+          <text x="48" y={y(tick) + 4} textAnchor="end" fontSize="10" fill="currentColor">{tick.toFixed(1)}%</text>
+        </g>)}
+        {visible.map(line => <polyline key={line.code} points={line.points.map(point => `${point.x},${y(point.pct)}`).join(' ')} fill="none" stroke={line.color} strokeWidth="2"><title>{line.name} · 截至 {line.points[line.points.length - 1].date}</title></polyline>)}
+        {[['09:30',54],['11:30 / 13:00',399],['15:00',744]].map(([label,x]) => <text key={label} x={x} y="255" textAnchor="middle" fontSize="11" fill="currentColor">{label}</text>)}
+      </svg>
+      {!visible.length && <div className="text-center text-xs text-muted-foreground">暂无可对比走势，请选择有数据的板块</div>}
+    </>}
+  </div>
+}
+
 interface MarketIndex {
   symbol: string
   name: string
@@ -47,6 +114,7 @@ interface MarketStatus {
 }
 
 interface HotStockItem {
+  change_5m_pct?: number | null
   symbol: string
   market: string
   name: string
@@ -269,10 +337,11 @@ export default function DashboardPage() {
   const [previewInsight, setPreviewInsight] = useState<AnalysisRecord | null>(null)
 
   // Discovery (Hot boards / stocks)
-  const [discoverTab, setDiscoverTab] = useLocalStorage<'boards' | 'stocks'>('panwatch_dashboard_discoverTab', 'boards')
+  const [discoverTab, setDiscoverTab] = useLocalStorage<'boards' | 'stocks' | 'rapid'>('panwatch_dashboard_discoverTab', 'boards')
   const [discoverMarket, setDiscoverMarket] = useLocalStorage<'CN' | 'HK' | 'US'>('panwatch_dashboard_discoverMarket', 'CN')
   const [stocksMode, setStocksMode] = useLocalStorage<'turnover' | 'gainers' | 'for_you'>('panwatch_dashboard_stocksMode', 'for_you')
   const [boardsMode, setBoardsMode] = useLocalStorage<'gainers' | 'turnover'>('panwatch_dashboard_boardsMode', 'gainers')
+  const discoveryRequestRef = useRef(0)
   const [hotStocks, setHotStocks] = useState<HotStockItem[]>([])
   const [hotBoards, setHotBoards] = useState<HotBoardItem[]>([])
   const [discoverLoading, setDiscoverLoading] = useState(false)
@@ -318,8 +387,6 @@ export default function DashboardPage() {
     loadPortfolio()
     loadWatchlist()
     loadAIInsights()
-    loadDiscovery('boards')
-    loadDiscovery('stocks', { silent: true })
 
     // Check if onboarding should be shown
     const onboardingCompleted = localStorage.getItem('panwatch_onboarding_completed')
@@ -483,28 +550,32 @@ export default function DashboardPage() {
     }
   }
 
-  const loadDiscovery = async (which?: 'boards' | 'stocks', opts?: { silent?: boolean; force?: boolean }) => {
+  const loadDiscovery = async (which?: 'boards' | 'stocks' | 'rapid', opts?: { silent?: boolean; force?: boolean }) => {
     const tab = which || discoverTab
+    const requestId = ++discoveryRequestRef.current
+    const stockMode = tab === 'rapid' ? 'rapid' : stocksMode
     const silent = !!opts?.silent
     const force = !!opts?.force
 
     const cacheKey = tab === 'boards'
       ? `${discoverMarket}:${boardsMode}`
-      : `${discoverMarket}:${stocksMode}`
+      : `${discoverMarket}:${stockMode}`
     const now = Date.now()
-    const ttlMs = 60 * 1000
+    const ttlMs = tab === 'rapid' ? 20_000 : 60_000
     const cache = tab === 'boards'
       ? discoveryCacheRef.current.boards[cacheKey]
       : discoveryCacheRef.current.stocks[cacheKey]
     const isFresh = cache && (now - cache.ts) < ttlMs
 
     if (!force && isFresh) {
+      setDiscoverLoading(false)
+      setDiscoverError('')
       if (tab === 'boards') setHotBoards(cache.data as HotBoardItem[])
       else setHotStocks(cache.data as HotStockItem[])
       return
     }
 
-    if (!silent) {
+    if (!silent && requestId === discoveryRequestRef.current) {
       setDiscoverLoading(true)
       setDiscoverError('')
     }
@@ -515,11 +586,12 @@ export default function DashboardPage() {
           mode: boardsMode,
           limit: 12,
         })
+        if (requestId !== discoveryRequestRef.current) return
         const normalized = items || []
         setHotBoards(normalized)
         discoveryCacheRef.current.boards[cacheKey] = { ts: now, data: normalized }
       } else {
-        if (stocksMode === 'for_you') {
+        if (stockMode === 'for_you') {
           const [turnoverItems, gainerItems] = await Promise.all([
             discoveryApi.listHotStocks({ market: discoverMarket, mode: 'turnover', limit: 20 }),
             discoveryApi.listHotStocks({ market: discoverMarket, mode: 'gainers', limit: 20 }),
@@ -528,28 +600,30 @@ export default function DashboardPage() {
           for (const item of [...(turnoverItems || []), ...(gainerItems || [])]) {
             map.set(item.symbol, item)
           }
+          if (requestId !== discoveryRequestRef.current) return
           const normalized = Array.from(map.values())
           setHotStocks(normalized)
           discoveryCacheRef.current.stocks[cacheKey] = { ts: now, data: normalized }
         } else {
           const items = await discoveryApi.listHotStocks({
             market: discoverMarket,
-            mode: stocksMode,
+            mode: stockMode,
             limit: 20,
           })
+          if (requestId !== discoveryRequestRef.current) return
           const normalized = items || []
           setHotStocks(normalized)
           discoveryCacheRef.current.stocks[cacheKey] = { ts: now, data: normalized }
         }
       }
     } catch (e) {
-      if (!silent) {
+      if (!silent && requestId === discoveryRequestRef.current) {
         setDiscoverError(e instanceof Error ? e.message : '加载失败')
         if (tab === 'boards') setHotBoards([])
         else setHotStocks([])
       }
     } finally {
-      if (!silent) setDiscoverLoading(false)
+      if (!silent && requestId === discoveryRequestRef.current) setDiscoverLoading(false)
     }
   }
 
@@ -800,15 +874,29 @@ export default function DashboardPage() {
   }, [hotStocks, holdingSet, watchlistSet, stylePreference, monitorStocks, discoverMarket])
 
   const visibleHotStocks = useMemo(() => {
-    if (stocksMode === 'for_you') return personalizedHotStocks.slice(0, 8)
+    if (discoverTab !== 'rapid' && stocksMode === 'for_you') return personalizedHotStocks.slice(0, 8)
     return hotStocks.slice(0, 8)
-  }, [stocksMode, personalizedHotStocks, hotStocks])
+  }, [discoverTab, stocksMode, personalizedHotStocks, hotStocks])
 
   useEffect(() => {
-    loadDiscovery('boards', { silent: true })
-    loadDiscovery('stocks', { silent: true })
+    let pending = false
+    const refresh = async (force = false) => {
+      if (pending) return
+      pending = true
+      try { await loadDiscovery(discoverTab, { force }) }
+      finally { pending = false }
+    }
+    refresh()
+    const timer = discoverTab === 'rapid'
+      ? window.setInterval(() => { refresh(true) }, 30_000)
+      : undefined
+    return () => {
+      if (timer !== undefined) window.clearInterval(timer)
+      // Ignore any response from the previous tab/market after switching.
+      discoveryRequestRef.current += 1
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discoverMarket, boardsMode, stocksMode])
+  }, [discoverTab, discoverMarket, boardsMode, stocksMode])
 
   return (
     <div>
@@ -1107,23 +1195,27 @@ export default function DashboardPage() {
         </div>
 
         <div className="card p-4">
-          <div className="flex items-center gap-1.5 mb-3">
+          <div className="flex flex-wrap items-center gap-1.5 mb-3">
             <button
-              onClick={() => { setDiscoverTab('boards'); loadDiscovery('boards') }}
+              onClick={() => { setDiscoverTab('boards') }}
               className={`text-[11px] px-2.5 py-1 rounded transition-colors ${discoverTab === 'boards' ? 'bg-primary text-primary-foreground' : 'bg-accent/50 text-muted-foreground hover:bg-accent'}`}
             >
               热门板块
             </button>
             <button
-              onClick={() => { setDiscoverTab('stocks'); loadDiscovery('stocks') }}
+              onClick={() => { setDiscoverTab('stocks') }}
               className={`text-[11px] px-2.5 py-1 rounded transition-colors ${discoverTab === 'stocks' ? 'bg-primary text-primary-foreground' : 'bg-accent/50 text-muted-foreground hover:bg-accent'}`}
             >
               热门股票
             </button>
 
+            <button
+              onClick={() => setDiscoverTab('rapid')}
+              className={`text-[11px] px-2.5 py-1 rounded transition-colors ${discoverTab === 'rapid' ? 'bg-primary text-primary-foreground' : 'bg-accent/50 text-muted-foreground hover:bg-accent'}`}
+            >快速涨幅</button>
             <div className="ml-auto flex items-center gap-2">
               {discoverTab === 'boards' ? (
-                <Select value={boardsMode} onValueChange={(v) => { setBoardsMode(v as any); setTimeout(() => loadDiscovery('boards'), 0) }}>
+                <Select value={boardsMode} onValueChange={(v) => { setBoardsMode(v as any) }}>
                   <SelectTrigger className="h-7 w-[110px] text-[12px]">
                     <SelectValue />
                   </SelectTrigger>
@@ -1132,8 +1224,10 @@ export default function DashboardPage() {
                     <SelectItem value="turnover">成交额榜</SelectItem>
                   </SelectContent>
                 </Select>
+              ) : discoverTab === 'rapid' ? (
+                <span className="text-[11px] text-muted-foreground">近 5 分钟涨幅 · 每 30 秒刷新</span>
               ) : (
-                <Select value={stocksMode} onValueChange={(v) => { setStocksMode(v as any); setTimeout(() => loadDiscovery('stocks'), 0) }}>
+                <Select value={stocksMode} onValueChange={(v) => { setStocksMode(v as any) }}>
                   <SelectTrigger className="h-7 w-[110px] text-[12px]">
                     <SelectValue />
                   </SelectTrigger>
@@ -1173,8 +1267,10 @@ export default function DashboardPage() {
                 )}
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {hotBoards.slice(0, 6).map(b => {
+              <div>
+                <BoardComparison boards={hotBoards} />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {hotBoards.map(b => {
                   const pct = b.change_pct ?? 0
                   const color = pct > 0 ? 'text-rose-500' : pct < 0 ? 'text-emerald-500' : 'text-muted-foreground'
                   return (
@@ -1184,7 +1280,7 @@ export default function DashboardPage() {
                       className="flex items-center justify-between gap-3 p-3 rounded-xl bg-accent/20 hover:bg-accent/35 transition-colors text-left"
                       title="查看板块成分股"
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <div className="text-[13px] font-medium text-foreground truncate">{b.name}</div>
                         <div className="text-[11px] text-muted-foreground font-mono truncate">{b.code}</div>
                       </div>
@@ -1192,21 +1288,22 @@ export default function DashboardPage() {
                     </button>
                   )
                 })}
+                </div>
               </div>
             )
           ) : (
             hotStocks.length === 0 ? (
-              <div className="text-[12px] text-muted-foreground py-6 text-center">{discoverError || '暂无数据'}</div>
+              <div className="text-[12px] text-muted-foreground py-6 text-center">{discoverError || (discoverTab === 'rapid' ? '暂无近 5 分钟上涨的股票，或该市场未提供短线涨幅数据' : '暂无数据')}</div>
             ) : (
               <div className="space-y-2">
-                {stocksMode === 'for_you' && (
+                {discoverTab !== 'rapid' && stocksMode === 'for_you' && (
                   <div className="text-[11px] text-muted-foreground px-1">
                     根据持仓/自选/监控信号/风格偏好排序
                   </div>
                 )}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {visibleHotStocks.slice(0, 6).map(s => {
-                  const pct = s.change_pct ?? 0
+                  const pct = (discoverTab === 'rapid' ? s.change_5m_pct : s.change_pct) ?? 0
                   const color = pct > 0 ? 'text-rose-500' : pct < 0 ? 'text-emerald-500' : 'text-muted-foreground'
                   return (
                     <div
@@ -1226,7 +1323,8 @@ export default function DashboardPage() {
                       </div>
                       <div className="text-right">
                         <div className="text-[12px] font-mono text-foreground">{s.price != null ? s.price.toFixed(2) : '--'}</div>
-                        <div className={`text-[11px] font-mono ${color}`}>{pct >= 0 ? '+' : ''}{pct.toFixed(2)}%</div>
+                        <div className={`text-[11px] font-mono ${color}`}>{pct >= 0 ? '+' : ''}{pct.toFixed(2)}%{discoverTab === 'rapid' ? ' / 5分钟' : ''}</div>
+                        {discoverTab === 'rapid' && <div className="text-[10px] text-muted-foreground">今日 {s.change_pct == null ? '--' : `${s.change_pct > 0 ? '+' : ''}${s.change_pct.toFixed(2)}%`}</div>}
                       </div>
                     </div>
                   )

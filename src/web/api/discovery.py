@@ -1,5 +1,9 @@
 import logging
+import math
+import re
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -128,13 +132,22 @@ async def _hot_stocks_live_or_snapshot(
                 "change_pct": it.change_pct,
                 "turnover": it.turnover,
                 "volume": it.volume,
+                "change_5m_pct": it.change_5m_pct,
             }
             for it in items
         ]
+        if mode == "rapid":
+            valid = [
+                row for row in data
+                if row["change_5m_pct"] is not None and row["change_5m_pct"] > 0
+            ]
+            return sorted(valid, key=lambda row: row["change_5m_pct"], reverse=True)[:limit]
         if data:
             return data
     except Exception as e:
         logger.warning(f"discovery stocks live failed ({mkt}/{mode}): {type(e).__name__}: {e!r}")
+    if mode == "rapid":
+        raise HTTPException(503, "快速涨幅实时数据暂不可用，请稍后刷新")
     # Snapshot fallback: ensures UI is still usable when live source timeout/unavailable.
     return _latest_snapshot_stocks(db, mkt, limit=max(limit, 40))
 
@@ -233,16 +246,16 @@ async def get_hot_stocks(
 ):
     """Hot stocks for discovery.
 
-    mode: turnover | gainers
+    mode: turnover | gainers | rapid
     """
 
     market = _normalize_market(market)
     mode = (mode or "turnover").lower()
-    if mode not in ("turnover", "gainers"):
+    if mode not in ("turnover", "gainers", "rapid"):
         raise HTTPException(400, f"不支持的 mode: {mode}")
 
     key = f"stocks:{market}:{mode}:{int(limit)}"
-    cached = _cache_get(key, ttl_s=45)
+    cached = _cache_get(key, ttl_s=20 if mode == "rapid" else 45)
     if cached is not None:
         return cached
 
@@ -255,7 +268,7 @@ async def get_hot_stocks(
         mode=mode,
         limit=max(1, min(int(limit), 100)),
     )
-    if not data:
+    if not data and mode != "rapid":
         raise HTTPException(
             503, "热门股票数据源不可用（实时源与本地快照均不可用）"
         )
@@ -400,5 +413,41 @@ async def get_board_stocks(
         }
         for it in items
     ]
+    _cache_set(key, data)
+    return data
+
+
+@router.get("/boards/{board_code}/trend")
+async def get_board_trend(board_code: str) -> dict:
+    """Today's minute bars for a real CN industry/concept board."""
+    code = board_code.strip().upper()
+    if not re.fullmatch(r"BK\d{4,6}", code):
+        return {"points": [], "change_pct": None}
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    key = f"board_intraday:{code}:{today}"
+    cached = _cache_get(key, ttl_s=60)
+    if cached is not None:
+        return cached
+    collector = EastMoneyDiscoveryCollector(timeout_s=8.0, proxy=_resolve_proxy() or None, retries=0)
+    try:
+        bars = await collector.fetch_board_intraday(board_code=code)
+    except Exception as exc:
+        raise HTTPException(503, "板块走势暂不可用") from exc
+    points = [
+        {"date": bar.date, "close": bar.close}
+        for bar in sorted(bars, key=lambda bar: bar.date)
+        if bar.date.startswith(today + " ") and math.isfinite(bar.close) and bar.close > 0
+    ]
+    if not points:
+        return {"points": [], "change_pct": None}
+    # Use the prior trading close as a common percentage baseline.
+    daily = await collector.fetch_board_klines(board_code=code, days=10)
+    previous = [bar for bar in daily if bar.date[:10] < today and math.isfinite(bar.close) and bar.close > 0]
+    prev_close = max(previous, key=lambda bar: bar.date).close if previous else None
+    data = {
+        "points": points,
+        "change_pct": None,
+        "prev_close": prev_close,
+    }
     _cache_set(key, data)
     return data

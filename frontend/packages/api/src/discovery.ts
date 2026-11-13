@@ -21,6 +21,7 @@ export interface HotStockItem {
   price: number | null
   change_pct: number | null
   turnover: number | null
+  change_5m_pct?: number | null
   volume?: number | null
 }
 
@@ -32,9 +33,10 @@ export interface HotBoardItem {
 }
 
 export const discoveryApi = {
+  boardTrend: (code: string) => fetchAPI<{ points: { date: string; close: number }[]; prev_close?: number | null; change_pct: number | null }>(`/discovery/boards/${encodeURIComponent(code)}/trend`),
   listHotStocks: (params?: {
     market?: 'CN' | 'HK' | 'US'
-    mode?: 'turnover' | 'gainers' | 'for_you'
+    mode?: 'turnover' | 'gainers' | 'for_you' | 'rapid'
     limit?: number
   }) =>
     fetchAPI<HotStockItem[]>(

@@ -1,10 +1,19 @@
 import logging
+import math
 from dataclasses import dataclass
 
 import httpx
 
 
 logger = logging.getLogger(__name__)
+
+
+def _finite_number(value: object) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -16,6 +25,7 @@ class HotStock:
     change_pct: float | None
     turnover: float | None
     volume: float | None
+    change_5m_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -69,8 +79,8 @@ class EastMoneyDiscoveryCollector:
     ) -> list[HotStock]:
         market = (market or "CN").upper()
 
-        fid = "f6" if mode == "turnover" else "f3"
-        fields = "f12,f14,f2,f3,f6,f5"
+        fid = {"turnover": "f6", "rapid": "f11"}.get(mode, "f3")
+        fields = "f12,f14,f2,f3,f6,f5,f11"
         if market == "CN":
             fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"  # A-share
         elif market == "HK":
@@ -102,10 +112,11 @@ class EastMoneyDiscoveryCollector:
                         symbol=str(it.get("f12") or "").strip(),
                         market=market,
                         name=str(it.get("f14") or "").strip(),
-                        price=it.get("f2"),
-                        change_pct=it.get("f3"),
-                        turnover=it.get("f6"),
-                        volume=it.get("f5"),
+                        price=_finite_number(it.get("f2")),
+                        change_pct=_finite_number(it.get("f3")),
+                        turnover=_finite_number(it.get("f6")),
+                        volume=_finite_number(it.get("f5")),
+                        change_5m_pct=_finite_number(it.get("f11")),
                     )
                 )
             except Exception:
@@ -249,6 +260,31 @@ class EastMoneyDiscoveryCollector:
             except Exception:
                 continue
         return result[-limit:]
+
+    async def fetch_board_intraday(self, *, board_code: str) -> list[BoardKline]:
+        """One-minute board bars; the API layer selects today's Shanghai session."""
+        params = {
+            "secid": f"90.{board_code.strip().upper()}",
+            "klt": "1", "fqt": "0", "lmt": "300", "end": "20500101",
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57",
+        }
+        data = await self._get_json(self.BOARD_KLINE_API, params=params)
+        rows = ((data or {}).get("data") or {}).get("klines") or []
+        result: list[BoardKline] = []
+        for row in rows:
+            parts = str(row).split(",")
+            if len(parts) < 5:
+                continue
+            close = _finite_number(parts[2])
+            if close is None or close <= 0:
+                continue
+            result.append(BoardKline(
+                date=parts[0], open=_finite_number(parts[1]) or close,
+                close=close, high=_finite_number(parts[3]) or close,
+                low=_finite_number(parts[4]) or close, volume=None, turnover=None,
+            ))
+        return result
 
     async def _get_json(self, url: str, *, params: dict) -> dict:
         headers = {
