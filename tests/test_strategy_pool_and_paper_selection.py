@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 from src.core import mcp_datasource, paper_trading_engine, strategy_catalog, strategy_pool
 from src.core.paper_trading_engine import PaperTradingEngine
+from src.core.strong_b_paper import CN_TZ, STRONG_B_CODE
 from src.web.api import paper_trading, recommendations
 from src.web.database import Base
 from src.web.models import (
@@ -67,14 +68,14 @@ def _signal(
 
 
 def test_strategy_pool_seeds_default_builtin_strategies(monkeypatch, tmp_path):
-    """策略池 — 默认初始化返回 10 个内置策略且带新字段"""
+    """策略池 — 新内置策略可进入模拟盘策略选择"""
     Session = _session_factory(tmp_path)
     _patch_sessions(monkeypatch, Session)
 
     data = strategy_pool.list_strategy_pool(enabled_only=False)
     items = data["items"]
 
-    assert len(items) == 10
+    assert len(items) == len(strategy_catalog.DEFAULT_STRATEGIES)
     assert {item["strategy_type"] for item in items} == {"builtin"}
     assert {item["code"] for item in items} >= {
         "trend_follow",
@@ -82,6 +83,7 @@ def test_strategy_pool_seeds_default_builtin_strategies(monkeypatch, tmp_path):
         "market_scan",
         "price_action",
         "base_position_vwap_t",
+        STRONG_B_CODE,
     }
     assert all("run_config" in item for item in items)
     assert all("auto_run_enabled" in item for item in items)
@@ -313,6 +315,103 @@ def test_paper_entries_require_price_inside_entry_range(monkeypatch, tmp_path):
         assert [evt["reason"] for evt in skip_events] == ["above_entry_range"]
     finally:
         db.close()
+
+
+def test_strong_b_paper_enters_on_next_session_and_exits_at_deadline(monkeypatch, tmp_path):
+    Session = _session_factory(tmp_path)
+    _patch_sessions(monkeypatch, Session)
+    strategy_catalog.ensure_strategy_catalog()
+    engine = PaperTradingEngine()
+    now = datetime(2026, 11, 27, 15, 25, tzinfo=CN_TZ)  # Friday
+    price = 10.0
+    quote_delay_seconds = 0
+
+    monkeypatch.setattr(paper_trading_engine, "_utc_now", lambda: now.astimezone(timezone.utc))
+    monkeypatch.setattr(engine, "_fetch_quotes_map", lambda keys: {
+        ("CN", "600001"): {
+            "current_price": price, "prev_close": 10.0, "volume": 10_000,
+            "data_as_of": (now - timedelta(seconds=quote_delay_seconds)).isoformat(),
+        }
+    })
+    with Session() as db:
+        account = engine._get_or_create_account(db)
+        old = _signal(symbol="600001", strategy_code="breakout_validity")
+        strong = _signal(symbol="600001", strategy_code=STRONG_B_CODE)
+        old.snapshot_date = strong.snapshot_date = "2026-11-27"
+        old.created_at = old.updated_at = strong.created_at = strong.updated_at = now
+        strong.payload = {"paper_entry_date": "2026-11-30", "paper_exit_date": "2026-12-28",
+                          "entry_ceiling": 11.5}
+        strong.target_price = None
+        db.add_all([old, strong])
+        strategy_pool.save_paper_strategy_selection({"mode": "custom", "strategy_codes": [STRONG_B_CODE]}, db)
+
+        assert engine._check_entries(db, account)[0] == 0
+        now = datetime(2026, 11, 30, 9, 32, tzinfo=CN_TZ)
+        quote_delay_seconds = 180
+        assert engine._check_entries(db, account)[0] == 0
+        quote_delay_seconds = 0
+        # Both strategies selected, same stock and score. The dedicated signal wins the tie.
+        strategy_pool.save_paper_strategy_selection(
+            {"mode": "custom", "strategy_codes": ["breakout_validity", STRONG_B_CODE]}, db,
+        )
+        old.snapshot_date = "2026-11-30"
+        old.updated_at = now
+        db.commit()
+        assert engine._check_entries(db, account)[0] == 1
+        pos = db.query(PaperTradingPosition).one()
+        assert pos.strategy_code == STRONG_B_CODE
+        assert pos.entry_price == 10.01
+        assert pos.stop_loss == 8.8
+        assert pos.target_price is None
+
+        now = now.replace(hour=14)
+        price = 8.7
+        assert engine._check_exits(db, account)[0] == 0  # T+1 blocks same-day sales.
+
+        price = 10.8
+        now = datetime(2026, 12, 28, 14, 56, tzinfo=CN_TZ)
+        assert engine._check_exits(db, account)[0] == 0
+        now = now.replace(minute=58)
+        assert engine._check_exits(db, account)[0] == 1
+        trade = db.query(PaperTradingTrade).one()
+        assert trade.strategy_code == STRONG_B_CODE
+        assert trade.exit_reason == "max_holding_days"
+        assert trade.pnl_pct == round(trade.pnl / (pos.entry_price * pos.quantity * 1.0003) * 100, 2)
+
+
+def test_strong_b_exit_only_uses_its_own_structure_signal(monkeypatch, tmp_path):
+    Session = _session_factory(tmp_path)
+    _patch_sessions(monkeypatch, Session)
+    engine = PaperTradingEngine()
+    now = datetime(2026, 12, 1, 9, 35, tzinfo=CN_TZ)
+    monkeypatch.setattr(paper_trading_engine, "_utc_now", lambda: now.astimezone(timezone.utc))
+    quote = {"current_price": 9.9, "prev_close": 10.0, "volume": 10_000, "data_as_of": now.isoformat()}
+    monkeypatch.setattr(engine, "_fetch_quotes_map", lambda keys: {("CN", "600001"): quote})
+    with Session() as db:
+        account = engine._get_or_create_account(db)
+        pos = PaperTradingPosition(
+            stock_symbol="600001", stock_market="CN", entry_price=10.0, stop_loss=8.8,
+            signal_run_id=123, strategy_code=STRONG_B_CODE, opened_at=now - timedelta(days=1),
+        )
+        db.add(pos)
+        db.flush()
+        sell = _signal(symbol="600001", strategy_code="breakout_validity")
+        sell.action = "sell"
+        sell.payload = {"paper_position_id": pos.id}
+        db.add(sell)
+        db.commit()
+        assert engine._check_exits(db, account)[0] == 0
+        sell.strategy_code = STRONG_B_CODE
+        sell.payload = {"paper_position_id": pos.id + 1}
+        db.commit()
+        assert engine._check_exits(db, account)[0] == 0
+        sell.payload = {"paper_position_id": pos.id}
+        quote["current_price"] = 9.0
+        db.commit()
+        assert engine._check_exits(db, account)[0] == 0  # Locked at the adverse limit.
+        quote["current_price"] = 9.1
+        assert engine._check_exits(db, account)[0] == 1
+        assert db.query(PaperTradingTrade).one().exit_reason == "structure_invalidated"
 
 
 def test_strategy_pool_update_rejects_invalid_risk_level(monkeypatch, tmp_path):

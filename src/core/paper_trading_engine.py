@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from src.core.providers import ProviderRequest, get_quote_orchestrator
 from src.core.strategy_pool import resolve_enabled_strategy_codes_for_paper
+from src.core.strong_b_paper import CN_TZ, STRONG_B_CODE, is_opening_window, is_tradable_quote
 from src.core.trade_rules import get_trade_rules
 from src.models.market import MarketCode, MARKETS
 from src.web.database import SessionLocal
@@ -334,7 +335,9 @@ class PaperTradingEngine:
         skip_events: list[dict] = []
         # 查询最新活跃买入信号(超过 SIGNAL_MAX_AGE_DAYS 的陈旧信号不再触发建仓,
         # 避免生成方未及时置 inactive 时按过时的入场区间开仓)
-        fresh_after = (_utc_now() - timedelta(days=SIGNAL_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        now = _utc_now()
+        fresh_after = (now - timedelta(days=SIGNAL_MAX_AGE_DAYS)).strftime("%Y-%m-%d")
+        cn_date = now.astimezone(CN_TZ).date().isoformat()
         query = (
             db.query(StrategySignalRun)
             .filter(
@@ -342,9 +345,20 @@ class PaperTradingEngine:
                 StrategySignalRun.action.in_(["buy", "add"]),
                 StrategySignalRun.entry_low.isnot(None),
                 StrategySignalRun.entry_high.isnot(None),
-                StrategySignalRun.snapshot_date >= fresh_after,
             )
         )
+        regular_signal = (
+            (StrategySignalRun.strategy_code != STRONG_B_CODE)
+            & (StrategySignalRun.snapshot_date >= fresh_after)
+        )
+        if is_opening_window(now):
+            strong_b_due = (
+                (StrategySignalRun.strategy_code == STRONG_B_CODE)
+                & (StrategySignalRun.payload["paper_entry_date"].as_string() == cn_date)
+            )
+            query = query.filter(or_(regular_signal, strong_b_due))
+        else:
+            query = query.filter(regular_signal)
         selected_codes = resolve_enabled_strategy_codes_for_paper(db)
         # 先在 SQL 层按已选策略过滤,避免未选策略的高分信号挤占 limit 名额
         if selected_codes is not None:
@@ -356,7 +370,10 @@ class PaperTradingEngine:
         excluded = [m for m in ALL_MARKETS if alloc.get(m, 0.0) <= 0]
         if excluded:
             query = query.filter(StrategySignalRun.stock_market.notin_(excluded))
-        signals = query.order_by(StrategySignalRun.rank_score.desc()).limit(50).all()
+        signals = query.order_by(
+            StrategySignalRun.rank_score.desc(),
+            case((StrategySignalRun.strategy_code == STRONG_B_CODE, 1), else_=0).desc(),
+        ).limit(50).all()
         entry_events: list[tuple[PaperTradingPosition, StrategySignalRun | None]] = []
         new_keys: set[tuple[str, str]] = set()
         if not signals:
@@ -408,10 +425,11 @@ class PaperTradingEngine:
 
         opened = 0
         for sig in candidates:
+            strong_b = sig.strategy_code == STRONG_B_CODE
             config = strategy_configs.get(sig.strategy_code or "", {})
             ttl_hours = _config_float(config, "signal_ttl_hours", 48.0)
             sig_time = _aware(sig.updated_at or sig.created_at)
-            if ttl_hours > 0 and sig_time is not None:
+            if not strong_b and ttl_hours > 0 and sig_time is not None:
                 age_hours = (_utc_now() - sig_time).total_seconds() / 3600.0
                 if age_hours > ttl_hours:
                     _skip_event(skip_events, sig, "signal_expired", f"信号已过期 {age_hours:.1f}h")
@@ -425,6 +443,17 @@ class PaperTradingEngine:
             if current_price is None or current_price <= 0:
                 _skip_event(skip_events, sig, "invalid_price", "当前价无效")
                 continue
+            if strong_b:
+                fill_time = _utc_now()
+                if (not is_opening_window(fill_time)
+                        or not is_tradable_quote(quote, fill_time, buy=True)):
+                    _skip_event(skip_events, sig, "strong_b_no_opening_fill", "开盘时段无可成交的实时行情")
+                    continue
+                payload = sig.payload if isinstance(sig.payload, dict) else {}
+                ceiling = _safe_float(payload.get("entry_ceiling"))
+                if not 0 < (sig.stop_loss or 0) < current_price < (ceiling or 0):
+                    _skip_event(skip_events, sig, "strong_b_outside_structure", "现价超出初始止损和入场上限")
+                    continue
             if sig.entry_low and current_price < sig.entry_low:
                 _skip_event(skip_events, sig, "below_entry_range", f"{current_price:.2f} < {sig.entry_low:.2f}")
                 continue
@@ -458,7 +487,7 @@ class PaperTradingEngine:
             # 优先用信号的止损/止盈比例，否则用默认 -8%/+15%
             stop_loss = sig.stop_loss
             target_price = sig.target_price
-            if stop_loss and sig.entry_low and sig.entry_low > 0:
+            if not strong_b and stop_loss and sig.entry_low and sig.entry_low > 0:
                 # 保留信号的止损比例，映射到实际入场价
                 orig_mid = (sig.entry_low + (sig.entry_high or sig.entry_low)) / 2
                 if orig_mid > 0:
@@ -472,7 +501,9 @@ class PaperTradingEngine:
             if not stop_loss or stop_loss <= 0 or stop_loss >= entry_price:
                 pct = sl_frac if sl_frac is not None else stop_loss_pct
                 stop_loss = round(entry_price * (1 - pct), 4)
-            if not target_price or target_price <= 0 or target_price <= entry_price:
+            if strong_b:
+                target_price = None
+            elif not target_price or target_price <= 0 or target_price <= entry_price:
                 pct = tp_frac if tp_frac is not None else target_profit_pct
                 target_price = round(entry_price * (1 + pct), 4)
 
@@ -492,6 +523,8 @@ class PaperTradingEngine:
                 signal_action=sig.action or "",
                 strategy_code=sig.strategy_code or "",
             )
+            if strong_b:
+                pos.opened_at = fill_time
             db.add(pos)
             account.current_capital -= cost
             market_cash[mkt] = market_cash.get(mkt, 0.0) - cost
@@ -531,6 +564,8 @@ class PaperTradingEngine:
         fees = (pos.entry_price * pos.quantity * fee_pct) + (exit_price * pos.quantity * (fee_pct + tax_pct))
         pnl = (exit_price - pos.entry_price) * pos.quantity - fees
         pnl_pct = ((exit_price - pos.entry_price) / pos.entry_price * 100) if pos.entry_price > 0 else 0.0
+        if pos.strategy_code == STRONG_B_CODE and pos.entry_price > 0 and pos.quantity > 0:
+            pnl_pct = pnl / (pos.entry_price * pos.quantity * (1 + fee_pct)) * 100
 
         holding_days = 0
         if pos.opened_at:
@@ -598,6 +633,8 @@ class PaperTradingEngine:
         # 批量获取报价
         syms = [(p.stock_symbol, p.stock_market) for p in positions]
         quotes = self._fetch_quotes_map(syms)
+        now = _utc_now()
+        cn_now = now.astimezone(CN_TZ)
 
         closed = 0
         for pos in positions:
@@ -614,6 +651,12 @@ class PaperTradingEngine:
             # 更新现价和浮动盈亏
             pos.current_price = current_price
             pos.unrealized_pnl = (current_price - pos.entry_price) * pos.quantity
+            strong_b = pos.strategy_code == STRONG_B_CODE
+            if strong_b:
+                opened_at = _aware(pos.opened_at)
+                if (opened_at is None or opened_at.astimezone(CN_TZ).date() >= cn_now.date()
+                        or not is_tradable_quote(quote, now, buy=False)):
+                    continue
 
             # 检查止损
             if pos.stop_loss and current_price <= pos.stop_loss:
@@ -629,6 +672,29 @@ class PaperTradingEngine:
                 closed += 1
                 continue
 
+            if strong_b:
+                exit_signal = db.query(StrategySignalRun.id).filter(
+                    StrategySignalRun.strategy_code == STRONG_B_CODE,
+                    StrategySignalRun.stock_symbol == pos.stock_symbol,
+                    StrategySignalRun.stock_market == pos.stock_market,
+                    StrategySignalRun.status == "active",
+                    StrategySignalRun.action == "sell",
+                    StrategySignalRun.payload["paper_position_id"].as_integer() == pos.id,
+                ).first()
+                signal = db.get(StrategySignalRun, pos.signal_run_id) if pos.signal_run_id else None
+                payload = signal.payload if signal and isinstance(signal.payload, dict) else {}
+                deadline = payload.get("paper_exit_date")
+                today = cn_now.date().isoformat()
+                due = isinstance(deadline, str) and (
+                    deadline < today or (deadline == today and cn_now.time() >= time(14, 57))
+                )
+                if exit_signal or due:
+                    reason = "structure_invalidated" if exit_signal else "max_holding_days"
+                    trade = self._close_position(db, account, pos, current_price, reason)
+                    exit_events.append((pos, trade))
+                    closed += 1
+                continue
+
             # 检查信号反转
             if pos.signal_run_id:
                 latest = (
@@ -637,6 +703,7 @@ class PaperTradingEngine:
                         StrategySignalRun.stock_symbol == pos.stock_symbol,
                         StrategySignalRun.stock_market == pos.stock_market,
                         StrategySignalRun.status == "active",
+                        StrategySignalRun.strategy_code != STRONG_B_CODE,
                     )
                     .order_by(StrategySignalRun.created_at.desc())
                     .first()

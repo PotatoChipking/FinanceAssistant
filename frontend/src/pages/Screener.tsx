@@ -91,7 +91,7 @@ function ResultActions({
   )
 }
 
-export default function ScreenerPage() {
+export default function ScreenerPage({ onRunStrongB }: { onRunStrongB?: () => void }) {
   const [catalog, setCatalog] = useState<ScreenerFunctionCatalog | null>(null)
   const [providers, setProviders] = useState<ScreenerProviderCatalogItem[]>([])
   const [formulas, setFormulas] = useState<ScreenerFormulaItem[]>([])
@@ -315,7 +315,8 @@ export default function ScreenerPage() {
             用通达信风格公式筛选自选股和板块池成分股，命中后可加入自选、查看 K 线或触发 TradingAgents 单股深度分析。
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onRunStrongB && <Button variant="secondary" onClick={onRunStrongB}>运行强势 B</Button>}
           <Button variant="secondary" onClick={validateFormula} disabled={validating}>
             {validating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Code2 className="h-4 w-4" />}
             校验

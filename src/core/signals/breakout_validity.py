@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 EPS = 0.0001
+BREAKOUT_ENTRY_BAND = (0.99, 1.03)
+BREAKOUT_HOLDING_DAYS = 10
 
 
 def _value(row: Any, key: str, default: Any = None) -> Any:

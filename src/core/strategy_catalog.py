@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.core.strong_b_paper import STRONG_B_CODE, STRONG_B_HOLDING_SESSIONS, STRONG_B_NAME
 from src.web.database import SessionLocal
 from src.web.models import StrategyCatalog, StrategyWeight
 
@@ -140,6 +141,14 @@ DEFAULT_STRATEGIES: tuple[StrategySpec, ...] = (
             "horizon_days": 10,
         },
         default_weight=1.10,
+    ),
+    StrategySpec(
+        code=STRONG_B_CODE,
+        name=STRONG_B_NAME,
+        description="强势 B 首次确认后，下一交易日开盘时段模拟买入。保留原始止损和结构失效，最多持有 20 个交易日。",
+        market_scope="CN",
+        params={"horizon_days": STRONG_B_HOLDING_SESSIONS},
+        run_config={"fee_pct": 0.0003, "tax_pct": 0.0005, "slippage_pct": 0.001},
     ),
 )
 

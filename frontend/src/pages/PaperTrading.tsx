@@ -23,6 +23,8 @@ const EXIT_REASON_MAP: Record<string, string> = {
   stop_loss: '止损',
   target_price: '止盈',
   signal_reversal: '信号反转',
+  structure_invalidated: '突破结构失效',
+  max_holding_days: '持有到期',
   manual: '手动平仓',
 }
 
@@ -34,6 +36,8 @@ const SKIP_REASON_LABELS: Record<string, string> = {
   invalid_price: '价格无效',
   below_entry_range: '低于入场区间',
   above_entry_range: '高于入场区间',
+  strong_b_no_opening_fill: '开盘报价不可成交',
+  strong_b_outside_structure: '价格超出突破结构范围',
   market_disabled: '市场未分配资金',
   quantity_too_small: '仓位不足一手',
   insufficient_cash: '资金不足',

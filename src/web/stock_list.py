@@ -4,6 +4,8 @@ import os
 import time
 import logging
 import concurrent.futures
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -12,6 +14,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data")
 CACHE_FILE = os.path.join(DATA_DIR, "stock_list_cache.json")
 CACHE_TTL = 86400 * 7  # 7 days
+CACHE_VERSION = 2
 
 # 东方财富 A 股（使用 push2delay 域名，避免重定向）
 EASTMONEY_URL = "http://80.push2delay.eastmoney.com/api/qt/clist/get"
@@ -22,7 +25,7 @@ EASTMONEY_PARAMS = {
     "invt": "2",
     "fid": "f12",
     "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-    "fields": "f12,f14",
+    "fields": "f12,f14,f100",
 }
 
 # 东方财富港股参数
@@ -67,7 +70,8 @@ def _load_cache(*, allow_stale: bool = False) -> list[dict] | None:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         stocks = data["stocks"]
-        if isinstance(stocks, list) and (allow_stale or time.time() - data.get("ts", 0) < CACHE_TTL):
+        current = data.get("version") == CACHE_VERSION and time.time() - data.get("ts", 0) < CACHE_TTL
+        if isinstance(stocks, list) and (allow_stale or current):
             return stocks
     except (json.JSONDecodeError, KeyError):
         pass
@@ -77,7 +81,7 @@ def _load_cache(*, allow_stale: bool = False) -> list[dict] | None:
 def _save_cache(stocks: list[dict]):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"ts": time.time(), "stocks": stocks}, f, ensure_ascii=False)
+        json.dump({"version": CACHE_VERSION, "ts": time.time(), "stocks": stocks}, f, ensure_ascii=False)
 
 
 HEADERS = {
@@ -87,18 +91,27 @@ HEADERS = {
 }
 
 
-def _fetch_page(client: httpx.Client, page: int) -> list[dict]:
+def _cn_stock(item: dict, as_of: str) -> dict:
+    stock = {"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"}
+    industry = item.get("f100")
+    if isinstance(industry, str) and industry.strip() not in ("", "-", "--"):
+        stock.update(industry=industry.strip(), industry_as_of=as_of)
+    return stock
+
+
+def _fetch_page(client: httpx.Client, page: int, as_of: str) -> list[dict]:
     """获取东方财富股票列表的单页"""
     params = {**EASTMONEY_PARAMS, "pn": str(page), "pz": str(PAGE_SIZE)}
     resp = client.get(EASTMONEY_URL, params=params, timeout=30, follow_redirects=True)
     data = resp.json()
     diff = data.get("data") or {}
     items = diff.get("diff") or []
-    return [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in items]
+    return [_cn_stock(item, as_of) for item in items]
 
 
 def _fetch_from_eastmoney() -> list[dict]:
     """东方财富 A 股列表（HTTP 分页并发获取）"""
+    as_of = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
     with httpx.Client(follow_redirects=True, headers=HEADERS, timeout=30) as client:
         # 第一页: 获取总数
         params = {**EASTMONEY_PARAMS, "pn": "1", "pz": str(PAGE_SIZE)}
@@ -108,7 +121,7 @@ def _fetch_from_eastmoney() -> list[dict]:
         total = root.get("total", 0)
         first_items = root.get("diff") or []
 
-        stocks = [{"symbol": str(item["f12"]), "name": str(item["f14"]), "market": "CN"} for item in first_items]
+        stocks = [_cn_stock(item, as_of) for item in first_items]
 
         if total <= PAGE_SIZE:
             return stocks
@@ -116,7 +129,7 @@ def _fetch_from_eastmoney() -> list[dict]:
         # 剩余页并发获取
         pages_needed = (total + PAGE_SIZE - 1) // PAGE_SIZE
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_page, client, pn): pn for pn in range(2, pages_needed + 1)}
+            futures = {pool.submit(_fetch_page, client, pn, as_of): pn for pn in range(2, pages_needed + 1)}
             for future in concurrent.futures.as_completed(futures):
                 try:
                     stocks.extend(future.result())

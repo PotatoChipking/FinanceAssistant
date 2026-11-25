@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 
+MAIN_BOARD_PREFIXES = ("60", "000", "001", "002", "003")
+
+
 def get_cn_exchange(symbol: str) -> str:
     """Return CN exchange code: SH / SZ / BJ.
 

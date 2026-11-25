@@ -1,5 +1,11 @@
 """突破有效性状态机测试:合成K线覆盖各状态与路径。"""
 
+import pytest
+
+from src.core.breakout_exit_rules import ma5_exit, volume_doji_exit, volume_stall_exit
+from src.core.breakout_retest_study import (
+    Bar, Event, Execution, _simulate, run_path_study, run_study, summarize,
+)
 from src.core.signals.breakout_validity import BreakoutParams, compute_breakout_validity
 
 
@@ -178,3 +184,200 @@ def test_insufficient_data():
     """数据不足10根 → insufficient"""
     r = compute_breakout_validity([_bar(_date(i), 10, 10.1, 9.9, 10, 100) for i in range(5)])
     assert r.state == "insufficient"
+
+
+def _study(
+    rows: list[dict],
+    d0: str,
+    *,
+    sessions: list[str] | None = None,
+    end: str | None = None,
+    holding_days: int = 2,
+) -> list[Event]:
+    return run_study(
+        {"600001": [Bar(**row) for row in rows]},
+        sessions or [row["date"] for row in rows],
+        d0,
+        end or rows[-1]["date"],
+        Execution(commission_bps=0, sell_tax_bps=0, slippage_bps=0, holding_days=holding_days),
+        BreakoutParams(),
+    )
+
+
+def test_study_compares_first_confirmation_with_later_path_c() -> None:
+    rows, level = _make_event()
+    d0 = rows[-1]["date"]
+    rows = _hold_days(rows, level, 3)
+    first_signal = rows[-1]["date"]
+    c_day = len(rows)
+    rows.append(_bar(_date(c_day), level * 1.028, level * 1.04, level * 1.01, level * 1.035, 600))
+    rows = _hold_days(rows, level, 3, mult=1.04)
+
+    [event] = _study(rows, d0)
+
+    assert event.first.signal_date == first_signal
+    assert event.first.entry_date == _date(c_day)
+    assert event.path_c.signal_date == _date(c_day)
+    assert event.path_c.entry_date == _date(c_day + 1)
+    assert "C" in event.path_c_paths.split("+")
+    assert event.first.status == event.path_c.status == "closed"
+    assert summarize([event])["paired_delayed_closed_trades"] == 1
+
+    [prefix] = _study(rows, d0, end=first_signal)
+    assert prefix.first.status == "entry_bar_unavailable"
+    assert prefix.path_c.status == "observation_incomplete"
+
+
+def test_study_avoids_same_day_exit_and_prices_stop_at_next_gap() -> None:
+    rows, level = _make_event()
+    d0 = rows[-1]["date"]
+    rows = _hold_days(rows, level, 3)
+    entry_index = len(rows)
+    rows.append(_bar(_date(entry_index), level * 1.03, level * 1.05, level * 0.94, level * 1.04))
+    gap = level * 0.93
+    rows.append(_bar(_date(entry_index + 1), gap, level * 0.96, level * 0.91, level * 0.95))
+
+    [event] = _study(rows, d0)
+
+    assert event.first.exit_reason == "stop_gap"
+    assert event.first.exit_date > event.first.entry_date
+    assert event.first.exit_price == pytest.approx(gap, abs=1e-6)
+
+
+def test_study_exits_structure_invalidation_on_following_open() -> None:
+    rows, level = _make_event()
+    d0 = rows[-1]["date"]
+    rows = _hold_days(rows, level, 3)
+    entry_index = len(rows)
+    rows.append(_bar(_date(entry_index), level * 1.025, level * 1.04, level * 0.995, level * 0.999, 800))
+    rows.append(_bar(_date(entry_index + 1), level, level * 1.01, level * 0.996, level * 0.998, 800))
+    rows.append(_bar(_date(entry_index + 2), level, level * 1.01, level * 0.996, level * 0.997, 800))
+    rows.append(_bar(_date(entry_index + 3), level * 0.995, level, level * 0.99, level * 0.996))
+
+    [event] = _study(rows, d0, holding_days=10)
+
+    assert event.first.exit_date == _date(entry_index + 3)
+    assert event.first.exit_reason == "structure_invalidated"
+
+
+def test_study_marks_missing_entry_session_without_trading_on_later_bar() -> None:
+    rows, level = _make_event()
+    d0 = rows[-1]["date"]
+    rows = _hold_days(rows, level, 5)
+    sessions = [row["date"] for row in rows]
+    del rows[-2]
+
+    [event] = _study(rows, d0, sessions=sessions)
+
+    assert event.first.status == "entry_bar_unavailable"
+    assert event.path_c.status == "observation_incomplete"
+
+
+def test_study_checks_dated_eligibility_again_at_entry() -> None:
+    rows, level = _make_event()
+    d0 = rows[-1]["date"]
+    rows = _hold_days(rows, level, 4)
+    bars = [Bar(**row) for row in rows[:-1]]
+    bars.append(Bar(**rows[-1], eligible_for_entry=False))
+
+    [event] = run_study(
+        {"600001": bars}, [bar.date for bar in bars], d0, bars[-1].date,
+        Execution(), BreakoutParams(),
+    )
+
+    assert event.first.signal_date == bars[-2].date
+    assert event.first.status == "entry_ineligible"
+    assert event.first.entry_date == ""
+
+
+def test_path_study_counts_overlaps_and_keeps_scanning_after_c() -> None:
+    rows, level = _make_event(vol=900)
+    d0 = rows[-1]["date"]
+    rows = _hold_days(rows, level, 2)
+    c_day = len(rows)
+    rows.append(_bar(_date(c_day), level * 1.02, level * 1.04, level * 1.01, level * 1.035, 600))
+    b_day = len(rows)
+    rows.append(_bar(_date(b_day), level * 1.036, level * 1.05, level * 1.03, level * 1.048, 2100))
+    rows = _hold_days(rows, level, 2, mult=1.052)
+
+    trades = run_path_study(
+        {"600001": [Bar(**row) for row in rows]}, [row["date"] for row in rows],
+        d0, rows[-1]["date"], Execution(), BreakoutParams(),
+    )
+    by_path = {record.path: record for record in trades}
+
+    assert [record.path for record in trades] == ["B", "C", "D"]
+    assert by_path["C"].confirmed_paths == by_path["D"].confirmed_paths == "C+D"
+    assert by_path["C"].trade == by_path["D"].trade
+    assert by_path["C"].trade.signal_date == _date(c_day)
+    assert by_path["B"].trade.signal_date == _date(b_day)
+    assert by_path["B"].trade.entry_date == _date(b_day + 1)
+
+
+def test_ma5_exit_replaces_target_and_fills_after_the_close_signal() -> None:
+    rows, level = _make_event()
+    d0 = len(rows) - 1
+    rows = _hold_days(rows, level, 3)
+    signal = len(rows) - 1
+    rows.append(_bar(_date(signal + 1), level * 1.03, level * 1.045, level * 1.02, level * 1.04))
+    rows.append(_bar(_date(signal + 2), level * 1.12, level * 1.16, level * 1.06, level * 1.07))
+    rows.append(_bar(_date(signal + 3), level * 1.06, level * 1.07, level, level * 1.01))
+    rows.append(_bar(_date(signal + 4), level * 1.02, level * 1.04, level, level * 1.03))
+    bars = [Bar(**row) for row in rows]
+    sessions = {bar.date: i for i, bar in enumerate(bars)}
+    params = BreakoutParams()
+    confirmed = compute_breakout_validity(bars[:signal + 1], params=params, anchor_d0_date=bars[d0].date)
+    args = (bars, d0, (signal, confirmed), True, sessions, d0, params, Execution())
+
+    fixed = _simulate(*args)
+    trailing = _simulate(*args, trend_exit=ma5_exit)
+
+    assert fixed.exit_reason == "target_price"
+    assert fixed.exit_date == _date(signal + 2)
+    assert trailing.entry_price == fixed.entry_price
+    assert trailing.exit_reason == "close_below_ma5"
+    assert trailing.exit_date == _date(signal + 4)
+
+
+def test_doji_and_stall_use_only_bars_after_target_activation() -> None:
+    bars = [Bar(_date(i), 100, 102, 99, 100, 100) for i in range(5)]
+    bars.append(Bar(_date(5), 100, 103, 99, 100.1, 200))
+    bars.append(Bar(_date(6), 99.2, 100, 98, 98.9, 150))
+    bars.append(Bar(_date(7), 99, 101, 98, 99, 250))
+
+    assert volume_doji_exit(bars, 5, 5) == ""
+    assert volume_doji_exit(bars, 6, 6) == ""
+    assert volume_doji_exit(bars, 6, 5) == "volume_doji_break"
+    assert volume_stall_exit(bars, 6, 5) == ""
+    assert volume_stall_exit(bars, 7, 5) == "volume_stall"
+
+
+def test_entry_reward_risk_checks_the_open_with_costs_before_entering() -> None:
+    rows, level = _make_event()
+    d0 = len(rows) - 1
+    rows = _hold_days(rows, level, 3)
+    signal = len(rows) - 1
+    rows.append(_bar(_date(signal + 1), level * 1.045, level * 1.055, level * 1.02, level * 1.04))
+    rows = _hold_days(rows, level, 2, mult=1.05)
+    bars = [Bar(**row) for row in rows]
+    sessions = {bar.date: index for index, bar in enumerate(bars)}
+    params = BreakoutParams()
+    confirmed = compute_breakout_validity(bars[:signal + 1], params=params, anchor_d0_date=bars[d0].date)
+    assert confirmed.stop_loss is not None and confirmed.target_price is not None
+    execution = Execution(holding_days=2)
+    entry_price = bars[signal + 1].open * (1 + execution.slippage_bps / 10_000)
+    ratio = execution.entry_reward_risk(entry_price, confirmed.stop_loss, confirmed.target_price)
+    assert ratio is not None
+    without_costs = Execution(commission_bps=0, sell_tax_bps=0, slippage_bps=0)
+    gross_ratio = without_costs.entry_reward_risk(
+        bars[signal + 1].open, confirmed.stop_loss, confirmed.target_price,
+    )
+    assert gross_ratio is not None and gross_ratio > ratio
+    args = (bars, d0, (signal, confirmed), True, sessions, d0, params, execution)
+
+    baseline = _simulate(*args)
+    assert baseline.status == "closed"
+    assert _simulate(*args, min_reward_risk=ratio) == baseline
+    blocked = _simulate(*args, min_reward_risk=gross_ratio)
+    assert blocked.status == "below_min_reward_risk"
+    assert blocked.entry_date == ""

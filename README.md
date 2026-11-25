@@ -284,6 +284,23 @@ cd frontend && pnpm install && pnpm dev       # 前端 :5183
 本仓库由 [PotatoChipking](https://github.com/PotatoChipking) 维护。
 自定义 Agent 和数据源开发请参考 [贡献指南](CONTRIBUTING.md)。
 
+## 突破有效性专项回测
+
+在「发现 → 选股」点击「运行强势 B」，可手动扫描主板并在 B 类观察池查看结果。手动扫描使用已收盘的日 K。模拟盘的「强势 B（模拟）」从定时盘后扫描取信号，首次确认后在下一交易日开盘时段尝试入场，按原止损、结构失效或 20 个交易日到期退出。
+
+对同一批「突破有效性」事件，逐类回测 A、B、C、D 四类买点。每只股票在同一突破事件下，每类买点只记首次确认。若同一天同时确认多类买点，同一笔模拟成交会出现在相应的多类统计中。汇总也提供确认当日仅命中单类的子样本。
+
+```bash
+python -m src.core.breakout_retest_study --by-path --output-dir data/breakout-path-study
+```
+
+- 命令只读 SQLite 日 K 缓存，输出 `path-trades.csv` 和 `summary.json`。省略 `--by-path` 可复现此前「任一路径首次确认与 C 首次确认」的对照。
+- 搭配 `--by-path --min-reward-risk 1.5` 可测试入场赔率门槛。按开盘模拟成交价和原定止盈、止损位计算净盈亏比，三处都计入对应费用与滑点。
+- 可传入 `--db`、`--start`、`--end`。日期采用 `YYYY-MM-DD`。`--start` 限定突破日，`--end` 也限制交易可使用的最后一根 K 线。重复运行时使用新的输出目录。
+- 首次确认后尝试在下一交易日开盘成交。四类买点使用相同的入场区间、止盈止损与持有期限。买入当日不卖出，收盘确认失效后最早在下一交易日开盘退出。缺少日 K 时会在明细中标记，期末未平仓的样本不计入已实现收益。
+- 双边佣金默认各 3 bps，卖出税费 5 bps，双边滑点各 10 bps，都是模拟假设。可用 `--commission-bps`、`--sell-tax-bps`、`--slippage-bps` 调整。
+- 统计以独立突破事件为单位，个股交易各自模拟。股票范围按缓存中的主板代码前缀筛选，交易日用缓存覆盖的 A 股日线日期近似。现有缓存缺少历史 ST、退市状态和盘口可成交量，单价上涨和下跌日分别按买入和卖出受限处理。结果中的配对收益差仅统计两组均完成交易的同一事件。
+
 ## Runtime Notes
 
 - Recommended backend startup: `python server.py`.

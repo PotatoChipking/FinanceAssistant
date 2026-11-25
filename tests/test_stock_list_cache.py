@@ -64,3 +64,21 @@ def test_partial_refresh_keeps_cached_cn_without_overwriting_cache(monkeypatch, 
     }
     assert path.read_text(encoding="utf-8") == original
     assert "A 股股票列表刷新失败" in caplog.text
+
+
+def test_industry_cache_upgrade_keeps_legacy_fallback_and_refreshes_classification(monkeypatch, tmp_path):
+    path = tmp_path / "stock_list_cache.json"
+    old_stock = {"symbol": "600000", "name": "浦发银行", "market": "CN"}
+    path.write_text(json.dumps({"ts": time.time(), "stocks": [old_stock]}))
+    monkeypatch.setattr(stock_list, "CACHE_FILE", str(path))
+    new_stock = stock_list._cn_stock({"f12": "600000", "f14": "浦发银行", "f100": "银行"}, "2026-11-24")
+    monkeypatch.setattr(stock_list, "_fetch_from_eastmoney", lambda: [new_stock])
+    monkeypatch.setattr(stock_list, "_fetch_hk_from_eastmoney", lambda: [])
+    monkeypatch.setattr(stock_list, "_fetch_us_from_eastmoney", lambda: [])
+    monkeypatch.setattr(stock_list, "_fetch_bj_from_eastmoney", lambda: [])
+
+    assert stock_list._load_cache(allow_stale=True) == [old_stock]
+    assert stock_list.get_stock_list() == [new_stock]
+    assert new_stock["industry"] == "银行"
+    assert new_stock["industry_as_of"] == "2026-11-24"
+    assert stock_list._load_cache() == [new_stock]
