@@ -217,13 +217,15 @@ def _historical_signals(db: Session, strategies: dict[str, StrategyCatalog], run
     codes = [code for code, s in strategies.items() if (s.strategy_type or "builtin") in {"builtin", "agent", "mcp"}]
     if not codes:
         return []
+    # Signal status is mutable after its snapshot. A signal that was active on
+    # its historical date may now be inactive after expiry, so historical
+    # replay must use its dated action rather than today's status.
     q = (
         db.query(StrategySignalRun)
         .filter(
             StrategySignalRun.strategy_code.in_(codes),
             StrategySignalRun.snapshot_date >= run.start_date,
             StrategySignalRun.snapshot_date <= run.end_date,
-            StrategySignalRun.status == "active",
             StrategySignalRun.action.in_(("buy", "add")),
         )
         .order_by(StrategySignalRun.snapshot_date.asc(), StrategySignalRun.rank_score.desc())
