@@ -175,6 +175,13 @@ export default function StrategiesPage() {
     return { enabled, verified, screener }
   }, [items])
 
+  const backtestSignalCount = useMemo(
+    () => Object.values(backtestRun?.summary?.signal_counts || {}).reduce(
+      (total: number, count: any) => total + Number(count || 0), 0,
+    ),
+    [backtestRun?.summary?.signal_counts],
+  )
+
   const patchDraft = (code: string, patch: Partial<StrategyCatalogItem>) => {
     setDrafts(prev => ({ ...prev, [code]: { ...prev[code], ...patch } }))
   }
@@ -516,6 +523,11 @@ export default function StrategiesPage() {
 
           {backtestRun && (
             <div className="space-y-4">
+              {!!backtestRun.message && (
+                <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  {backtestRun.message}
+                </div>
+              )}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 <div className="rounded-lg border border-border p-3">
                   <div className="text-xs text-muted-foreground">状态</div>
@@ -534,8 +546,8 @@ export default function StrategiesPage() {
                   <div className="font-semibold">{fmtPct(backtestRun.summary?.win_rate)}</div>
                 </div>
                 <div className="rounded-lg border border-border p-3">
-                  <div className="text-xs text-muted-foreground">交易/跳过</div>
-                  <div className="font-semibold">{backtestRun.summary?.total_trades ?? 0}/{backtestRun.summary?.skipped_count ?? 0}</div>
+                  <div className="text-xs text-muted-foreground">信号/交易/跳过</div>
+                  <div className="font-semibold">{backtestSignalCount}/{backtestRun.summary?.total_trades ?? 0}/{backtestRun.summary?.skipped_count ?? 0}</div>
                 </div>
               </div>
 

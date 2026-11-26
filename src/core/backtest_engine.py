@@ -16,6 +16,7 @@ from src.core.providers import ProviderRequest, get_kline_orchestrator
 from src.core.screener.formula import FormulaEvaluator, parse_formula
 from src.core.screener.providers import ScreenerStock, get_screener_provider, normalize_universe_config
 from src.core.strategy_catalog import ensure_strategy_catalog
+from src.core.strong_b_paper import STRONG_B_CODE, STRONG_B_NAME
 from src.core.trade_rules import get_trade_rules
 from src.web.database import SessionLocal
 from src.web.models import (
@@ -704,6 +705,12 @@ def run_backtest(run_id: str) -> dict:
         signals = _historical_signals(db, selected, run)
         formula_signals, formula_skips = _screener_formula_signals(db, selected, run, rules)
         signals.extend(formula_signals)
+        signal_counts = Counter(signal.strategy_code for signal in signals)
+        missing_history_signals = [
+            code for code, strategy in selected.items()
+            if (strategy.strategy_type or "builtin") in {"builtin", "agent", "mcp"}
+            and not signal_counts[code]
+        ]
         signals.sort(key=lambda s: (s.signal_date, -s.rank_score, s.strategy_code, s.stock_symbol))
 
         trade_rows: list[BacktestTrade] = []
@@ -769,9 +776,19 @@ def run_backtest(run_id: str) -> dict:
             "win_rate": round((wins / len(completed) * 100.0) if completed else 0.0, 2),
             "sample_size": len(completed),
             "strategy_count": len(selected),
+            "signal_counts": dict(signal_counts),
+            "missing_history_signals": missing_history_signals,
         }
         run.status = "completed"
-        run.message = "回测完成，策略排名已更新"
+        if STRONG_B_CODE in missing_history_signals:
+            run.message = (
+                f"回测完成，但{STRONG_B_NAME}在此区间没有已保存的历史信号。策略池回测目前只回放历史信号记录，"
+                "不会从历史K线重新计算突破确认和强势股筛选，因此没有买入交易。"
+            )
+        elif missing_history_signals:
+            run.message = "回测完成，部分策略在区间内没有已保存的历史信号"
+        else:
+            run.message = "回测完成，策略排名已更新"
         run.summary = summary
         run.finished_at = _now()
         run.updated_at = _now()
