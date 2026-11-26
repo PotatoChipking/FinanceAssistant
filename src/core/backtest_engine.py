@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 from math import isfinite
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -30,6 +32,8 @@ from src.web.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+STRONG_B_REPLAY_DATA = Path(__file__).with_name("strong_b_replay_trades.csv")
 
 
 @dataclass
@@ -239,6 +243,150 @@ def _historical_signals(db: Session, strategies: dict[str, StrategyCatalog], run
         if strategy:
             out.append(_signal_from_row(row, strategy))
     return out
+
+
+def _strong_b_replay_signals(
+    run: BacktestRun,
+    existing: list[BacktestSignal],
+) -> list[BacktestSignal]:
+    existing_keys = {(signal.stock_symbol, signal.signal_date) for signal in existing
+                     if signal.strategy_code == STRONG_B_CODE}
+    out = []
+    with STRONG_B_REPLAY_DATA.open(encoding="utf-8-sig", newline="") as file:
+        for row in csv.DictReader(file):
+            if not run.start_date <= row["signal_date"] <= run.end_date:
+                continue
+            if row["exit_date"] > run.end_date:
+                continue
+            key = (row["symbol"], row["signal_date"])
+            if key in existing_keys:
+                continue
+            out.append(BacktestSignal(
+                strategy_code=STRONG_B_CODE,
+                strategy_name=STRONG_B_NAME,
+                strategy_type="builtin",
+                source_ref_id=None,
+                signal_run_id=None,
+                stock_symbol=row["symbol"],
+                stock_market="CN",
+                stock_name="",
+                signal_date=row["signal_date"],
+                entry_low=None,
+                entry_high=None,
+                stop_loss=float(row["initial_stop"]),
+                target_price=None,
+                holding_days=20,
+                rank_score=0.0,
+                meta={
+                    "source": "validated_strong_b_replay",
+                    "d0_date": row["d0"],
+                    "entry_date": row["entry_date"],
+                    "entry_price": float(row["entry_price"]),
+                    "exit_date": row["exit_date"],
+                    "exit_price": float(row["exit_price"]),
+                    "exit_reason": row["exit_reason"],
+                    "net_return_pct": float(row["net_return_pct"]),
+                    "study_period": row["period"],
+                },
+            ))
+            existing_keys.add(key)
+    return out
+
+
+def _execute_strong_b_replay(
+    run: BacktestRun,
+    signal: BacktestSignal,
+    strategy: StrategyCatalog,
+    available_cash: float,
+) -> tuple[ExecutedTrade | None, BacktestTrade | None, float]:
+    config = _run_config(strategy)
+    position_pct = min(1.0, _config_float(config, "position_pct", 0.05))
+    fee_pct = _config_float(config, "fee_pct", 0.0003)
+    tax_pct = _config_float(config, "tax_pct", 0.0005)
+    payload = signal.meta or {}
+    entry_price = float(payload["entry_price"])
+    exit_price = float(payload["exit_price"])
+    budget = max(0.0, available_cash * position_pct)
+    quantity = int(budget // entry_price)
+    quantity = (quantity // 100) * 100
+    if quantity <= 0:
+        return None, _skip_trade(run, signal, "insufficient_lot_size",
+                                 "按仓位计算不足最小交易单位"), available_cash
+
+    buy_fee = entry_price * quantity * fee_pct
+    entry_cost = entry_price * quantity + buy_fee
+    if entry_cost > available_cash:
+        quantity = int((available_cash / (entry_price * (1 + fee_pct))) // 100) * 100
+        if quantity <= 0:
+            return None, _skip_trade(run, signal, "insufficient_cash",
+                                     "可用资金不足"), available_cash
+        buy_fee = entry_price * quantity * fee_pct
+        entry_cost = entry_price * quantity + buy_fee
+
+    sell_fee = exit_price * quantity * (fee_pct + tax_pct)
+    proceeds = exit_price * quantity - sell_fee
+    pnl = proceeds - entry_cost
+    net_return_pct = pnl / entry_cost * 100 if entry_cost else 0.0
+    source_return_pct = float(payload["net_return_pct"])
+    assert abs(net_return_pct - source_return_pct) < 0.002, (
+        signal.stock_symbol, net_return_pct, source_return_pct,
+    )
+    entry_date = str(payload["entry_date"])
+    exit_date = str(payload["exit_date"])
+    holding_days = max(0, (_parse_day(exit_date) - _parse_day(entry_date)).days)
+    meta = {
+        **payload,
+        "position_pct": position_pct,
+        "fee_pct": fee_pct,
+        "tax_pct": tax_pct,
+        "slippage_pct": config.get("slippage_pct", 0.001),
+        "price_slippage_already_applied": True,
+    }
+    row = BacktestTrade(
+        run_id=run.id,
+        strategy_code=signal.strategy_code,
+        strategy_name=signal.strategy_name,
+        strategy_type=signal.strategy_type,
+        source_ref_id=None,
+        signal_run_id=None,
+        stock_symbol=signal.stock_symbol,
+        stock_market="CN",
+        stock_name=signal.stock_name,
+        quantity=quantity,
+        entry_date=entry_date,
+        exit_date=exit_date,
+        entry_price=round(entry_price, 4),
+        exit_price=round(exit_price, 4),
+        stop_loss=signal.stop_loss,
+        target_price=None,
+        pnl=round(pnl, 4),
+        pnl_pct=round(net_return_pct, 4),
+        fees=round(buy_fee + sell_fee, 4),
+        holding_days=holding_days,
+        exit_reason=str(payload["exit_reason"]),
+        skipped=False,
+        meta=meta,
+        opened_at=_dt(entry_date),
+        closed_at=_dt(exit_date),
+    )
+    executed = ExecutedTrade(
+        strategy_code=signal.strategy_code,
+        stock_key=f"CN:{signal.stock_symbol}",
+        entry_date=entry_date,
+        exit_date=exit_date,
+        quantity=quantity,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        pnl=pnl,
+        pnl_pct=net_return_pct,
+        fees=buy_fee + sell_fee,
+        entry_cost=entry_cost,
+        proceeds=proceeds,
+        exit_reason=str(payload["exit_reason"]),
+        holding_days=holding_days,
+        row=row,
+    )
+    return executed, None, entry_cost
 
 
 def _screener_formula_signals(db: Session, strategies: dict[str, StrategyCatalog], run: BacktestRun, rules: dict) -> tuple[list[BacktestSignal], list[BacktestSignal]]:
@@ -705,6 +853,8 @@ def run_backtest(run_id: str) -> dict:
 
         rules = get_trade_rules(db)
         signals = _historical_signals(db, selected, run)
+        if STRONG_B_CODE in selected and str(run.market or "CN").upper() == "CN":
+            signals.extend(_strong_b_replay_signals(run, signals))
         formula_signals, formula_skips = _screener_formula_signals(db, selected, run, rules)
         signals.extend(formula_signals)
         signal_counts = Counter(signal.strategy_code for signal in signals)
@@ -742,6 +892,25 @@ def run_backtest(run_id: str) -> dict:
                 trade_rows.append(_skip_trade(run, signal, "already_holding"))
                 continue
             kkey = (signal.stock_market or str(run.market or "CN").upper(), signal.stock_symbol)
+            if (signal.meta or {}).get("source") == "validated_strong_b_replay":
+                if kkey not in kline_map:
+                    kline_map[kkey] = _load_klines(
+                        signal.stock_symbol, signal.stock_market, run.start_date, run.end_date,
+                    )
+                trade, skipped, entry_cost = _execute_strong_b_replay(
+                    run, signal, strategy, available_cash,
+                )
+                if skipped is not None:
+                    trade_rows.append(skipped)
+                    continue
+                if trade is None:
+                    continue
+                available_cash -= entry_cost
+                active_until[pos_key] = trade.exit_date
+                pending_releases.append(trade)
+                executed.append(trade)
+                trade_rows.append(trade.row)
+                continue
             if kkey not in kline_map:
                 kline_map[kkey] = _load_klines(signal.stock_symbol, signal.stock_market or str(run.market or "CN").upper(), run.start_date, run.end_date)
             klines = kline_map[kkey]
@@ -784,8 +953,14 @@ def run_backtest(run_id: str) -> dict:
         run.status = "completed"
         if STRONG_B_CODE in missing_history_signals:
             run.message = (
-                f"回测完成，但{STRONG_B_NAME}在此区间没有已保存的历史信号。策略池回测目前只回放历史信号记录，"
-                "不会从历史K线重新计算突破确认和强势股筛选，因此没有买入交易。"
+                f"此区间没有{STRONG_B_NAME}可回放信号。已验证成交快照覆盖 2013–2020、2022–2023，"
+                "以及 2024-11-05 至 2026-11-04。未覆盖区间仍需已有历史信号记录。"
+            )
+        elif STRONG_B_CODE in selected:
+            run.message = (
+                "回测完成，强势 B 使用已验证历史成交快照回放。"
+                "覆盖 2013–2020、2022–2023、2024-11-05 至 2026-11-04，"
+                "不覆盖 2021 年及 2024-01 至 2024-11-04。"
             )
         elif missing_history_signals:
             run.message = "回测完成，部分策略在区间内没有已保存的历史信号"
